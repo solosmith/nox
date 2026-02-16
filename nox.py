@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""nox - Docker Container Manager"""
+"""nox - LXC Container Manager"""
 
 import argparse
 import json
@@ -8,23 +8,22 @@ import os
 import shutil
 import subprocess
 import sys
-import textwrap
 import time
-import urllib.request
 
 NOX_DIR = os.path.expanduser("~/.nox")
 CONTAINERS_DIR = os.path.join(NOX_DIR, "containers")
 CONFIG_FILE = os.path.join(NOX_DIR, "config.json")
+LXC_PATH = "/var/lib/lxc"
 
 DEFAULT_CONFIG = {
     "defaults": {"os": "debian", "cpus": 1, "ram": 512, "disk": 5},
     "env": {},
 }
 
-# Docker image mappings
-DOCKER_IMAGES = {
-    "debian": "debian:11",
-    "alpine": "alpine:3.20",
+# LXC template mappings
+LXC_TEMPLATES = {
+    "debian": "debian",
+    "alpine": "alpine",
 }
 
 # ---------------------------------------------------------------------------
@@ -89,21 +88,25 @@ def run(cmd, check=True, capture=True):
     return r
 
 
-def docker(args, check=True):
-    """Run docker command."""
-    return run(f"docker {args}", check=check)
+def lxc(args, check=True):
+    """Run lxc command."""
+    return run(f"sudo {args}", check=check)
 
 
 def container_exists(name):
-    r = docker(f"inspect {name}", check=False)
+    r = lxc(f"lxc-info -n {name}", check=False)
     return r.returncode == 0
 
 
 def container_state(name):
-    r = docker(f"inspect -f '{{{{.State.Status}}}}' {name}", check=False)
+    r = lxc(f"lxc-info -n {name} -s", check=False)
     if r.returncode != 0:
         return None
-    return r.stdout.strip().upper()
+    # Output format: "State:          RUNNING"
+    for line in r.stdout.splitlines():
+        if line.strip().startswith("State:"):
+            return line.split(":", 1)[1].strip().upper()
+    return None
 
 
 def container_dir(name):
@@ -133,20 +136,41 @@ def container_ip(name, timeout=60):
     """Get container IP address, waiting up to timeout seconds."""
     deadline = time.time() + timeout
     while time.time() < deadline:
-        r = docker(f"inspect {name}", check=False)
+        r = lxc(f"lxc-info -n {name} -iH", check=False)
         if r.returncode == 0:
-            try:
-                data = json.loads(r.stdout)
-                if data and len(data) > 0:
-                    networks = data[0].get("NetworkSettings", {}).get("Networks", {})
-                    nox_net = networks.get("nox-isolated", {})
-                    ip = nox_net.get("IPAddress", "")
-                    if ip:
-                        return ip
-            except:
-                pass
+            # lxc-info returns multiple IPs (IPv4 and IPv6), get first IPv4
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip()
+                if ip and ip != "-" and ":" not in ip:  # IPv4 only
+                    return ip
         time.sleep(2)
     return None
+
+
+def lxc_config_path(name):
+    """Get path to LXC container config file."""
+    return os.path.join(LXC_PATH, name, "config")
+
+
+def set_resource_limits(name, vcpus, ram_mb):
+    """Set cgroup resource limits for container."""
+    config_path = lxc_config_path(name)
+
+    # Build resource limit lines
+    limits = []
+    # CPU shares (cgroup v1) - 1024 shares per CPU
+    limits.append(f"lxc.cgroup.cpu.shares = {vcpus * 1024}")
+    # CPU max (cgroup v2) - quota/period format
+    limits.append(f"lxc.cgroup2.cpu.max = {vcpus * 100000} 100000")
+
+    # Memory limit
+    ram_bytes = ram_mb * 1024 * 1024
+    limits.append(f"lxc.cgroup.memory.limit_in_bytes = {ram_bytes}")
+    limits.append(f"lxc.cgroup2.memory.max = {ram_bytes}")
+
+    # Use sudo to read, modify, and write config
+    for limit in limits:
+        run(f"sudo sh -c 'echo \"{limit}\" >> {config_path}'")
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +237,6 @@ def generate_setup_script(name, os_name, init_scripts=None, password=None):
                 lines.append(f"# Running init script {idx}")
                 with open(script_path) as f:
                     script_content = f.read()
-                # Remove shebang and bash-specific options for sh compatibility
                 script_lines = script_content.splitlines()
                 for line in script_lines:
                     if line.startswith("#!"):
@@ -227,7 +250,7 @@ def generate_setup_script(name, os_name, init_scripts=None, password=None):
     if os_name == "debian":
         lines.append("service ssh start")
     else:
-        lines.append("/usr/sbin/sshd -D &")
+        lines.append("/usr/sbin/sshd")
 
     lines.append("")
     return "\n".join(lines)
@@ -239,7 +262,7 @@ def generate_setup_script(name, os_name, init_scripts=None, password=None):
 
 def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
                      init_scripts=None, autostart=False, password=None, start=True):
-    """Create a new Docker container. Returns (success, password) tuple."""
+    """Create a new LXC container. Returns (success, password) tuple."""
     if container_exists(name):
         print(f"Container '{name}' already exists.")
         return False, None
@@ -266,54 +289,61 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
 
     print(f"Creating container '{name}': os={os_name} vcpus={vcpus} ram={ram_mb}MB disk={disk_gb}GB")
 
-    # Get Docker image name
-    image = DOCKER_IMAGES.get(os_name)
-    if not image:
+    # Get LXC template name
+    template = LXC_TEMPLATES.get(os_name)
+    if not template:
         print(f"Error: unsupported OS '{os_name}'", file=sys.stderr)
         return False, None
 
-    # Ensure network exists
-    r = docker("network inspect nox-isolated", check=False)
-    if r.returncode != 0:
-        print("Creating nox-isolated network...")
-        docker("network create --subnet=192.168.101.0/24 nox-isolated")
+    # Create container with template
+    try:
+        if os_name == "debian":
+            lxc(f"lxc-create -n {name} -t download -- -d debian -r bullseye -a {arch}")
+        else:  # alpine
+            lxc(f"lxc-create -n {name} -t download -- -d alpine -r 3.20 -a {arch}")
+    except RuntimeError as e:
+        print(f"Failed to create container: {e}", file=sys.stderr)
+        return False, None
 
-    # Generate setup script
+    # Set resource limits
+    try:
+        set_resource_limits(name, vcpus, ram_mb)
+    except Exception as e:
+        print(f"Warning: Failed to set resource limits: {e}", file=sys.stderr)
+
+    # Configure autostart
+    if autostart:
+        config_path = lxc_config_path(name)
+        with open(config_path, 'a') as f:
+            f.write("lxc.start.auto = 1\n")
+
+    # Start container
+    if start:
+        try:
+            lxc(f"lxc-start -n {name}")
+            time.sleep(3)  # Wait for container to boot
+        except RuntimeError as e:
+            print(f"Failed to start container: {e}", file=sys.stderr)
+            lxc(f"lxc-destroy -n {name}", check=False)
+            return False, None
+
+    # Generate and run setup script
     setup_script = generate_setup_script(name, os_name, init_scripts, password)
 
-    # Save setup script
     d = container_dir(name)
     os.makedirs(d, exist_ok=True)
     setup_script_path = os.path.join(d, "setup.sh")
     with open(setup_script_path, "w") as f:
         f.write(setup_script)
 
-    # Create container with resource limits
-    restart_policy = "always" if autostart else "no"
-    cmd = (
-        f"run -d --name {name} "
-        f"--network nox-isolated "
-        f"--cpus={vcpus} "
-        f"--memory={ram_mb}M "
-        f"--restart={restart_policy} "
-        f"--cap-add=NET_ADMIN "
-        f"{image} "
-        f"sleep infinity"
-    )
-
+    # Copy and execute setup script
     try:
-        docker(cmd)
-    except RuntimeError as e:
-        print(f"Failed to create container: {e}", file=sys.stderr)
-        return False, None
-
-    # Copy and run setup script
-    try:
-        docker(f"cp {setup_script_path} {name}:/tmp/setup.sh")
-        docker(f"exec {name} sh /tmp/setup.sh")
+        lxc_rootfs = os.path.join(LXC_PATH, name, "rootfs")
+        run(f"sudo cp {setup_script_path} {lxc_rootfs}/tmp/setup.sh")
+        lxc(f"lxc-attach -n {name} -- sh /tmp/setup.sh")
     except RuntimeError as e:
         print(f"Failed to setup container: {e}", file=sys.stderr)
-        docker(f"rm -f {name}", check=False)
+        lxc(f"lxc-destroy -n {name}", check=False)
         return False, None
 
     # Save metadata
@@ -330,7 +360,7 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
     save_meta(name, meta)
 
     if not start:
-        docker(f"stop {name}", check=False)
+        lxc(f"lxc-stop -n {name}", check=False)
         print(f"Container '{name}' created (not started).")
     else:
         print(f"Container '{name}' created and started.")
@@ -347,16 +377,13 @@ def cmd_create(args):
     # Resolve init scripts
     init_scripts = []
     if args.script:
-        # Script directory is always /home/pi/nox/scripts
-        script_dir = "/home/pi/nox/scripts"
+        script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts")
         for script_name in args.script.split(","):
             script_name = script_name.strip()
-            # Check if it's a built-in script name
             builtin_path = os.path.join(script_dir, f"{script_name}.sh")
             if os.path.exists(builtin_path):
                 init_scripts.append(builtin_path)
             elif os.path.exists(script_name):
-                # It's a full path
                 init_scripts.append(script_name)
             else:
                 print(f"Warning: Script not found: {script_name}")
@@ -403,7 +430,7 @@ def cmd_start(args):
     if state == "RUNNING":
         print(f"Container '{args.name}' is already running.")
     else:
-        docker(f"start {args.name}")
+        lxc(f"lxc-start -n {args.name}")
         print(f"Container '{args.name}' started.")
 
 
@@ -415,7 +442,7 @@ def cmd_stop(args):
     if state != "RUNNING":
         print(f"Container '{args.name}' is not running (state: {state}).")
         return
-    docker(f"stop {args.name}")
+    lxc(f"lxc-stop -n {args.name}")
     print(f"Container '{args.name}' stopped.")
 
 
@@ -423,13 +450,14 @@ def cmd_restart(args):
     if not container_exists(args.name):
         print(f"Container '{args.name}' does not exist.", file=sys.stderr)
         sys.exit(1)
-    docker(f"restart {args.name}")
+    lxc(f"lxc-stop -n {args.name}", check=False)
+    time.sleep(2)
+    lxc(f"lxc-start -n {args.name}")
     print(f"Container '{args.name}' restarted.")
 
 
 def cmd_delete(args):
     if not container_exists(args.name):
-        # Clean up local files even if Docker doesn't know about it
         d = container_dir(args.name)
         if os.path.exists(d):
             shutil.rmtree(d)
@@ -440,10 +468,9 @@ def cmd_delete(args):
 
     state = container_state(args.name)
     if state == "RUNNING":
-        docker(f"stop {args.name}")
+        lxc(f"lxc-stop -n {args.name}")
 
-    docker(f"rm {args.name}")
-    # Also clean nox metadata
+    lxc(f"lxc-destroy -n {args.name}")
     d = container_dir(args.name)
     if os.path.exists(d):
         shutil.rmtree(d)
@@ -451,18 +478,17 @@ def cmd_delete(args):
 
 
 def cmd_list(args):
-    r = docker("ps -a --format '{{.Names}}'", check=False)
+    r = lxc("lxc-ls", check=False)
     if r.returncode != 0:
-        print("Could not list containers. Is Docker running?", file=sys.stderr)
+        print("Could not list containers. Is LXC installed?", file=sys.stderr)
         sys.exit(1)
 
-    container_names = [n.strip() for n in r.stdout.splitlines() if n.strip()]
+    container_names = [n.strip() for n in r.stdout.split() if n.strip()]
 
     if not container_names:
         print("No containers found.")
         return
 
-    # Parse Docker output and enrich with nox metadata
     print(f"{'NAME':<20} {'STATE':<15} {'OS':<10} {'CPUS':<6} {'RAM':<8} {'DISK':<8} {'AUTOSTART':<10} {'IP'}")
     print("-" * 95)
 
@@ -513,14 +539,22 @@ def cmd_autostart(args):
         print(f"Container '{args.name}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
+    config_path = lxc_config_path(args.name)
+
+    with open(config_path, 'r') as f:
+        lines = f.readlines()
+
+    # Remove old autostart line
+    lines = [l for l in lines if 'lxc.start.auto' not in l]
+
     if args.enable:
-        docker(f"update --restart=always {args.name}")
+        lines.append("lxc.start.auto = 1\n")
         meta = load_meta(args.name) or {}
         meta["autostart"] = True
         save_meta(args.name, meta)
         print(f"Autostart enabled for '{args.name}'.")
     elif args.disable:
-        docker(f"update --restart=no {args.name}")
+        lines.append("lxc.start.auto = 0\n")
         meta = load_meta(args.name) or {}
         meta["autostart"] = False
         save_meta(args.name, meta)
@@ -528,6 +562,9 @@ def cmd_autostart(args):
     else:
         print("Specify --enable or --disable.", file=sys.stderr)
         sys.exit(1)
+
+    with open(config_path, 'w') as f:
+        f.writelines(lines)
 
 
 def cmd_ssh(args):
@@ -537,7 +574,7 @@ def cmd_ssh(args):
 
     state = container_state(args.name)
     if state != "RUNNING":
-        docker(f"start {args.name}")
+        lxc(f"lxc-start -n {args.name}")
         print(f"Starting container '{args.name}'...")
         time.sleep(3)
 
@@ -590,8 +627,8 @@ def cmd_run(args):
 def cmd_images(args):
     arch = host_arch()
     print(f"Available images (arch: {arch}):\n")
-    for os_name, image in DOCKER_IMAGES.items():
-        print(f"  {os_name:<10} {image}")
+    for os_name, template in LXC_TEMPLATES.items():
+        print(f"  {os_name:<10} {template}")
     print()
 
 
@@ -622,7 +659,6 @@ def cmd_config(args):
             if p not in obj:
                 obj[p] = {}
             obj = obj[p]
-        # Try to parse as number
         val = args.value
         try:
             val = int(val)
@@ -650,7 +686,7 @@ def cmd_install_deps(args):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(prog="nox", description="Docker Container Manager")
+    parser = argparse.ArgumentParser(prog="nox", description="LXC Container Manager")
     sub = parser.add_subparsers(dest="command")
 
     # create
@@ -705,7 +741,7 @@ def main():
     p.add_argument("--script", required=True)
 
     # images
-    p = sub.add_parser("images", help="List available Docker images")
+    p = sub.add_parser("images", help="List available LXC templates")
 
     # config
     p = sub.add_parser("config", help="Manage nox config")
@@ -714,7 +750,7 @@ def main():
     p.add_argument("value", nargs="?", default=None)
 
     # install-deps
-    sub.add_parser("install-deps", help="Install Docker dependencies")
+    sub.add_parser("install-deps", help="Install LXC dependencies")
 
     args = parser.parse_args()
 

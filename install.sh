@@ -35,66 +35,139 @@ install_debian() {
     info "Installing dependencies (Debian/Ubuntu)..."
     sudo apt-get update -qq
     sudo apt-get install -y -qq \
-        docker.io \
+        lxc \
+        lxc-templates \
+        bridge-utils \
+        debootstrap \
         python3 \
         openssh-client
-    sudo systemctl enable docker
-    sudo systemctl start docker
-}
 
-install_fedora() {
-    info "Installing dependencies (Fedora/RHEL/CentOS)..."
-    sudo dnf install -y \
-        docker \
-        python3 \
-        openssh-clients
-    sudo systemctl enable docker
-    sudo systemctl start docker
-}
-
-install_arch() {
-    info "Installing dependencies (Arch)..."
-    sudo pacman -Sy --noconfirm \
-        docker \
-        python \
-        openssh
-    sudo systemctl enable docker
-    sudo systemctl start docker
+    # Enable and configure lxc networking
+    sudo systemctl enable lxc-net || true
+    sudo systemctl start lxc-net || true
 }
 
 install_alpine() {
     info "Installing dependencies (Alpine)..."
     sudo apk add \
-        docker \
+        lxc \
+        lxc-templates \
+        lxc-download \
+        bridge-utils \
+        dnsmasq \
+        iptables \
         python3 \
         openssh-client
-    sudo rc-update add docker boot
-    sudo service docker start
+
+    # Enable lxc service
+    sudo rc-update add lxc boot || true
+    sudo service lxc start || true
+
+    # Configure LXC bridge networking for Alpine
+    info "Configuring LXC bridge networking..."
+
+    # Create bridge
+    if ! ip link show lxcbr0 >/dev/null 2>&1; then
+        sudo brctl addbr lxcbr0
+        sudo ip addr add 10.0.3.1/24 dev lxcbr0
+        sudo ip link set lxcbr0 up
+    fi
+
+    # Enable IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf >/dev/null
+
+    # Configure NAT
+    sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE || true
+
+    # Configure dnsmasq for DHCP
+    sudo mkdir -p /etc/dnsmasq.d
+
+    # Disable local-service restriction
+    sudo sed -i 's/^local-service/#local-service/' /etc/dnsmasq.conf || true
+
+    sudo tee /etc/dnsmasq.d/lxc > /dev/null <<EOF
+interface=lxcbr0
+bind-interfaces
+dhcp-range=10.0.3.2,10.0.3.254,12h
+dhcp-option=3,10.0.3.1
+dhcp-option=6,10.0.3.1
+EOF
+
+    # Start dnsmasq
+    sudo rc-update add dnsmasq boot || true
+    sudo service dnsmasq restart || true
+
+    # Create bridge startup script
+    sudo tee /etc/local.d/lxc-bridge.start > /dev/null <<'EOF'
+#!/bin/sh
+if ! ip link show lxcbr0 >/dev/null 2>&1; then
+    brctl addbr lxcbr0
+    ip addr add 10.0.3.1/24 dev lxcbr0
+    ip link set lxcbr0 up
+fi
+sysctl -w net.ipv4.ip_forward=1
+iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
+EOF
+    sudo chmod +x /etc/local.d/lxc-bridge.start
+    sudo rc-update add local boot || true
 }
 
-install_suse() {
-    info "Installing dependencies (openSUSE/SLES)..."
-    sudo zypper install -y \
-        docker \
-        python3 \
-        openssh
-    sudo systemctl enable docker
-    sudo systemctl start docker
+configure_lxc() {
+    info "Configuring LXC..."
+
+    # Create default LXC config if it doesn't exist
+    if [ ! -f /etc/lxc/default.conf ]; then
+        sudo mkdir -p /etc/lxc
+        sudo tee /etc/lxc/default.conf > /dev/null <<EOF
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+EOF
+    fi
+
+    # Ensure lxc bridge is configured
+    if [ ! -f /etc/default/lxc-net ]; then
+        sudo mkdir -p /etc/default
+        sudo tee /etc/default/lxc-net > /dev/null <<EOF
+USE_LXC_BRIDGE="true"
+LXC_BRIDGE="lxcbr0"
+LXC_ADDR="10.0.3.1"
+LXC_NETMASK="255.255.255.0"
+LXC_NETWORK="10.0.3.0/24"
+LXC_DHCP_RANGE="10.0.3.2,10.0.3.254"
+LXC_DHCP_MAX="253"
+EOF
+    fi
 }
 
-enable_docker() {
-    info "Configuring Docker..."
+enable_user_lxc() {
+    info "Configuring user permissions..."
     local user
     user=$(whoami)
-    if getent group docker >/dev/null 2>&1; then
-        sudo usermod -aG docker "$user" 2>/dev/null || true
-        info "Added $user to docker group"
+
+    # Add user to lxc-related groups if they exist
+    for group in lxc lxc-dnsmasq; do
+        if getent group "$group" >/dev/null 2>&1; then
+            sudo usermod -aG "$group" "$user" 2>/dev/null || true
+        fi
+    done
+
+    # Configure subuid/subgid for unprivileged containers
+    if ! grep -q "^$user:" /etc/subuid 2>/dev/null; then
+        echo "$user:100000:65536" | sudo tee -a /etc/subuid >/dev/null
+    fi
+    if ! grep -q "^$user:" /etc/subgid 2>/dev/null; then
+        echo "$user:100000:65536" | sudo tee -a /etc/subgid >/dev/null
     fi
 }
 
 verify_install() {
     local ok=true
-    for cmd in docker python3; do
+    info "Verifying installation..."
+
+    for cmd in lxc-create lxc-start lxc-stop python3; do
         if command -v "$cmd" >/dev/null 2>&1; then
             info "  $cmd: $(command -v "$cmd")"
         else
@@ -102,6 +175,7 @@ verify_install() {
             ok=false
         fi
     done
+
     if [ "$ok" = true ]; then
         info "All dependencies installed successfully."
     else
@@ -111,8 +185,8 @@ verify_install() {
 }
 
 main() {
-    info "nox dependency installer"
-    info "========================"
+    info "nox dependency installer (LXC)"
+    info "=============================="
 
     local distro arch
     distro=$(detect_distro)
@@ -122,26 +196,24 @@ main() {
     case "$distro" in
         debian|ubuntu|raspbian|linuxmint|pop)
             install_debian ;;
-        fedora|rhel|centos|rocky|alma)
-            install_fedora ;;
-        arch|manjaro|endeavouros)
-            install_arch ;;
         alpine)
             install_alpine ;;
-        opensuse*|sles)
-            install_suse ;;
         *)
             error "Unsupported distro: $distro"
-            error "Please install manually: docker, python3"
+            error "Supported: Debian, Ubuntu, Alpine"
+            error "Please install manually: lxc, lxc-templates, bridge-utils, python3"
             exit 1 ;;
     esac
 
-    enable_docker
+    configure_lxc
+    enable_user_lxc
     verify_install
 
     info ""
     info "Done! You may need to log out and back in for group changes to take effect."
-    info "Or run: newgrp docker"
+    info "Or run: newgrp lxc"
+    info ""
+    info "Note: LXC commands require sudo. The nox tool will use sudo automatically."
 }
 
 main "$@"
