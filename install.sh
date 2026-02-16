@@ -59,6 +59,7 @@ check_existing_installation() {
                 return 0
             else
                 info "Update available: $CURRENT_VERSION → $LATEST_VERSION"
+                info "Will update nox and verify dependencies"
                 rm -rf "$TEMP_DIR"
                 return 1
             fi
@@ -70,13 +71,18 @@ check_existing_installation() {
 }
 
 SKIP_DEPS=false
+UPDATE_MODE=false
 if check_existing_installation; then
-    # Ask if user wants to verify/reinstall dependencies
-    read -p "Verify and reinstall dependencies if needed? [y/N] " -n 1 -r
+    # Already up to date - ask if user wants to verify dependencies
+    read -p "Verify and update dependencies if needed? [y/N] " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         SKIP_DEPS=true
     fi
+else
+    # Update available - always check dependencies
+    UPDATE_MODE=true
+    info "Update mode: will verify and update dependencies"
 fi
 
 detect_distro() {
@@ -117,7 +123,7 @@ is_virtualized() {
 }
 
 install_debian() {
-    info "Installing dependencies (Debian/Ubuntu)..."
+    info "Installing/updating dependencies (Debian/Ubuntu)..."
     sudo apt-get update -qq
     sudo apt-get install -y -qq \
         lxc \
@@ -126,6 +132,12 @@ install_debian() {
         debootstrap \
         python3 \
         openssh-client
+
+    # Upgrade existing packages if in update mode
+    if [ "$UPDATE_MODE" = true ]; then
+        info "Upgrading LXC and related packages..."
+        sudo apt-get upgrade -y -qq lxc lxc-templates bridge-utils
+    fi
 
     # Check if running in virtualized environment
     if is_virtualized; then
@@ -195,7 +207,7 @@ EOF
 }
 
 install_alpine() {
-    info "Installing dependencies (Alpine)..."
+    info "Installing/updating dependencies (Alpine)..."
     sudo apk add \
         lxc \
         lxc-templates \
@@ -204,6 +216,12 @@ install_alpine() {
         iptables \
         python3 \
         openssh-client
+
+    # Upgrade existing packages if in update mode
+    if [ "$UPDATE_MODE" = true ]; then
+        info "Upgrading LXC and related packages..."
+        sudo apk upgrade lxc lxc-templates bridge-utils
+    fi
 
     # Enable lxc service
     sudo rc-update add lxc boot || true
