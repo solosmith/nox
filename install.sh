@@ -24,8 +24,60 @@ else
     SUDO=""
 fi
 
-info "Installing nox - LXC Container Manager"
+# GitHub repository URL
+GITHUB_RAW_URL="https://raw.githubusercontent.com/solosmith/nox/main"
+
+info "nox - LXC Container Manager"
 info "========================================"
+
+# Check if nox is already installed
+check_existing_installation() {
+    if command -v nox >/dev/null 2>&1; then
+        CURRENT_VERSION="unknown"
+        if [ -f /usr/local/bin/VERSION ]; then
+            CURRENT_VERSION=$(cat /usr/local/bin/VERSION)
+        fi
+        info "Found existing nox installation (version: $CURRENT_VERSION)"
+
+        # Check for latest version
+        info "Checking for updates..."
+        TEMP_DIR=$(mktemp -d)
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$GITHUB_RAW_URL/VERSION" -o "$TEMP_DIR/VERSION" 2>/dev/null || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q "$GITHUB_RAW_URL/VERSION" -O "$TEMP_DIR/VERSION" 2>/dev/null || true
+        fi
+
+        if [ -f "$TEMP_DIR/VERSION" ]; then
+            LATEST_VERSION=$(cat "$TEMP_DIR/VERSION")
+            if [ "$CURRENT_VERSION" = "$LATEST_VERSION" ]; then
+                info "Already up to date (version $CURRENT_VERSION)"
+                rm -rf "$TEMP_DIR"
+
+                # Still verify dependencies
+                info "Verifying dependencies..."
+                return 0
+            else
+                info "Update available: $CURRENT_VERSION → $LATEST_VERSION"
+                rm -rf "$TEMP_DIR"
+                return 1
+            fi
+        fi
+        rm -rf "$TEMP_DIR"
+        return 1
+    fi
+    return 1
+}
+
+SKIP_DEPS=false
+if check_existing_installation; then
+    # Ask if user wants to verify/reinstall dependencies
+    read -p "Verify and reinstall dependencies if needed? [y/N] " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        SKIP_DEPS=true
+    fi
+fi
 
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -319,21 +371,25 @@ main() {
     arch=$(detect_arch)
     info "Detected: distro=$distro arch=$arch"
 
-    case "$distro" in
-        debian|ubuntu|raspbian|linuxmint|pop)
-            install_debian ;;
-        alpine)
-            install_alpine ;;
-        *)
-            error "Unsupported distro: $distro"
-            error "Supported: Debian, Ubuntu, Alpine"
-            error "Please install manually: lxc, lxc-templates, bridge-utils, python3"
-            exit 1 ;;
-    esac
+    if [ "$SKIP_DEPS" = false ]; then
+        case "$distro" in
+            debian|ubuntu|raspbian|linuxmint|pop)
+                install_debian ;;
+            alpine)
+                install_alpine ;;
+            *)
+                error "Unsupported distro: $distro"
+                error "Supported: Debian, Ubuntu, Alpine"
+                error "Please install manually: lxc, lxc-templates, bridge-utils, python3"
+                exit 1 ;;
+        esac
 
-    configure_lxc
-    enable_user_lxc
-    verify_install
+        configure_lxc
+        enable_user_lxc
+        verify_install
+    else
+        info "Skipping dependency installation"
+    fi
 
     # Download and install nox.py
     info ""
@@ -343,11 +399,33 @@ main() {
     cd "$TEMP_DIR"
 
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/nox.py -o nox.py
-        curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/VERSION -o VERSION
+        curl -fsSL "$GITHUB_RAW_URL/nox.py" -o nox.py || {
+            error "Failed to download nox.py from GitHub"
+            error "Make sure the repository is public or accessible"
+            cd /
+            rm -rf "$TEMP_DIR"
+            exit 1
+        }
+        curl -fsSL "$GITHUB_RAW_URL/VERSION" -o VERSION || {
+            error "Failed to download VERSION from GitHub"
+            cd /
+            rm -rf "$TEMP_DIR"
+            exit 1
+        }
     elif command -v wget >/dev/null 2>&1; then
-        wget -q https://raw.githubusercontent.com/solosmith/nox/main/nox.py -O nox.py
-        wget -q https://raw.githubusercontent.com/solosmith/nox/main/VERSION -O VERSION
+        wget -q "$GITHUB_RAW_URL/nox.py" -O nox.py || {
+            error "Failed to download nox.py from GitHub"
+            error "Make sure the repository is public or accessible"
+            cd /
+            rm -rf "$TEMP_DIR"
+            exit 1
+        }
+        wget -q "$GITHUB_RAW_URL/VERSION" -O VERSION || {
+            error "Failed to download VERSION from GitHub"
+            cd /
+            rm -rf "$TEMP_DIR"
+            exit 1
+        }
     else
         warn "Neither curl nor wget found. Please download nox.py manually."
         warn "Visit: https://github.com/solosmith/nox"
@@ -355,6 +433,9 @@ main() {
         rm -rf "$TEMP_DIR"
         exit 0
     fi
+
+    # Get version from downloaded file
+    INSTALL_VERSION=$(cat VERSION)
 
     $SUDO cp nox.py /usr/local/bin/nox
     $SUDO chmod +x /usr/local/bin/nox
@@ -370,9 +451,10 @@ main() {
     fi
 
     info ""
-    info "✓ nox installed successfully!"
+    info "✓ nox installed successfully! (version $INSTALL_VERSION)"
     info ""
     info "Quick start:"
+    info "  nox --version"
     info "  nox create mycontainer --os debian"
     info "  nox list"
     info "  nox ssh mycontainer"
