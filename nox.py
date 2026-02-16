@@ -412,14 +412,6 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
         # Update bridge in config
         run(f"sudo sed -i 's/lxc.net.0.link = .*/lxc.net.0.link = {bridge}/' {config_path}")
 
-    # Configure DNS servers in LXC config
-    config_path = lxc_config_path(name)
-    run(f"sudo sh -c 'echo \"lxc.net.0.ipv4.gateway = auto\" >> {config_path}'")
-    run(f"sudo sh -c 'echo \"lxc.net.0.ipv4.address = dhcp\" >> {config_path}'")
-    # Set DNS servers that will be used by the container
-    run(f"sudo sh -c 'echo \"# DNS configuration\" >> {config_path}'")
-    run(f"sudo sh -c 'echo \"lxc.hook.start-host = /bin/sh -c \\\"echo nameserver 8.8.8.8 > /var/lib/lxc/{name}/rootfs/etc/resolv.conf\\\"\" >> {config_path}'")
-
     # Configure autostart
     if autostart:
         config_path = lxc_config_path(name)
