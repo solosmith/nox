@@ -427,6 +427,15 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
             lxc(f"lxc-destroy -n {name}", check=False)
             return False, None
 
+    # Configure DNS in container
+    try:
+        lxc_rootfs = os.path.join(LXC_PATH, name, "rootfs")
+        # Set up DNS resolvers
+        dns_config = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"
+        run(f"sudo sh -c 'echo \"{dns_config}\" > {lxc_rootfs}/etc/resolv.conf'")
+    except Exception as e:
+        print(f"Warning: Failed to configure DNS: {e}", file=sys.stderr)
+
     # Generate and run setup script
     setup_script = generate_setup_script(name, os_name, init_scripts, password)
 
