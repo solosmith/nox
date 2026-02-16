@@ -421,28 +421,20 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
     if start:
         try:
             lxc(f"lxc-start -n {name}")
-            time.sleep(5)  # Wait longer for container to fully boot and rootfs to be ready
+            time.sleep(5)  # Wait for container to fully boot
         except RuntimeError as e:
             print(f"Failed to start container: {e}", file=sys.stderr)
             lxc(f"lxc-destroy -n {name}", check=False)
             return False, None
 
-    # Configure DNS in container (after container is fully started)
+    # Configure DNS in container (using lxc-attach to run inside container)
     if start:
         try:
-            lxc_rootfs = os.path.join(LXC_PATH, name, "rootfs")
-            resolv_conf = os.path.join(lxc_rootfs, "etc", "resolv.conf")
-
-            # Wait for /etc directory to exist
-            max_wait = 10
-            for i in range(max_wait):
-                if os.path.exists(os.path.join(lxc_rootfs, "etc")):
-                    break
-                time.sleep(1)
-
-            # Set up DNS resolvers
-            dns_config = "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"
-            run(f"sudo sh -c 'echo \"{dns_config}\" > {resolv_conf}'")
+            # Wait for container to be fully running
+            time.sleep(2)
+            # Configure DNS from inside the container
+            dns_config = "nameserver 8.8.8.8\\nnameserver 8.8.4.4"
+            lxc(f"lxc-attach -n {name} -- sh -c 'echo -e \"{dns_config}\" > /etc/resolv.conf'")
         except Exception as e:
             print(f"Warning: Failed to configure DNS: {e}", file=sys.stderr)
 
