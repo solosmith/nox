@@ -267,12 +267,78 @@ def generate_setup_script(name, os_name, init_scripts=None, password=None):
     return "\n".join(lines)
 
 
+def get_available_bridges():
+    """Get list of available network bridges with their subnets."""
+    bridges = []
+    try:
+        result = run("ip -4 addr show", check=False, capture=True)
+        current_bridge = None
+        current_ip = None
+
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            # Look for bridge interfaces
+            if line and not line.startswith(' '):
+                parts = line.split(':')
+                if len(parts) >= 2:
+                    current_bridge = parts[1].strip().split('@')[0]
+            # Look for inet addresses
+            elif line.startswith('inet '):
+                parts = line.split()
+                if len(parts) >= 2:
+                    ip_cidr = parts[1]
+                    ip = ip_cidr.split('/')[0]
+                    # Extract subnet (first 3 octets)
+                    subnet = '.'.join(ip.split('.')[:3]) + '.0'
+                    if current_bridge and 'br' in current_bridge.lower() or 'lxc' in current_bridge.lower():
+                        bridges.append({
+                            'bridge': current_bridge,
+                            'ip': ip,
+                            'subnet': subnet
+                        })
+    except:
+        pass
+
+    return bridges
+
+
+def select_network_bridge():
+    """Interactive bridge selection for container networking."""
+    bridges = get_available_bridges()
+
+    if not bridges:
+        print("No network bridges found. Using default lxcbr0.")
+        return "lxcbr0"
+
+    if len(bridges) == 1:
+        return bridges[0]['bridge']
+
+    print("\nAvailable network bridges:")
+    for i, bridge in enumerate(bridges, 1):
+        print(f"  {i}. {bridge['bridge']:<15} (subnet: {bridge['subnet']}/24, IP: {bridge['ip']})")
+
+    while True:
+        try:
+            choice = input("\nSelect bridge number (or press Enter for default): ").strip()
+            if not choice:
+                return bridges[0]['bridge']
+
+            idx = int(choice) - 1
+            if 0 <= idx < len(bridges):
+                return bridges[idx]['bridge']
+            else:
+                print(f"Please enter a number between 1 and {len(bridges)}")
+        except (ValueError, KeyboardInterrupt):
+            print("\nUsing default bridge")
+            return bridges[0]['bridge']
+
+
 # ---------------------------------------------------------------------------
 # Container creation
 # ---------------------------------------------------------------------------
 
 def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
-                     init_scripts=None, autostart=False, password=None, start=True):
+                     init_scripts=None, autostart=False, password=None, start=True, bridge=None):
     """Create a new LXC container. Returns (success, password) tuple."""
     if container_exists(name):
         print(f"Container '{name}' already exists.")
@@ -321,6 +387,12 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
         set_resource_limits(name, vcpus, ram_mb)
     except Exception as e:
         print(f"Warning: Failed to set resource limits: {e}", file=sys.stderr)
+
+    # Configure network bridge
+    if bridge:
+        config_path = lxc_config_path(name)
+        # Update bridge in config
+        run(f"sudo sed -i 's/lxc.net.0.link = .*/lxc.net.0.link = {bridge}/' {config_path}")
 
     # Configure autostart
     if autostart:
@@ -401,6 +473,13 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
 
 def cmd_create(args):
     """Create a new container and show SSH credentials."""
+    # Select network bridge if interactive mode
+    bridge = None
+    if not args.no_start and sys.stdin.isatty():
+        bridge = select_network_bridge()
+        if bridge != "lxcbr0":
+            print(f"Using bridge: {bridge}")
+
     # Resolve init scripts
     init_scripts = []
     if args.script:
@@ -419,7 +498,8 @@ def cmd_create(args):
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
         disk=args.disk, init_scripts=init_scripts if init_scripts else None,
         autostart=not getattr(args, "no_autostart", False),
-        start=not args.no_start
+        start=not args.no_start,
+        bridge=bridge
     )
 
     if not success:
