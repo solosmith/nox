@@ -6,12 +6,13 @@ A simple, Lima-like container manager for Linux using LXC. Create isolated conta
 
 - **Simple CLI** - Easy-to-use commands for container management
 - **LXC-based** - Uses native LXC containers (no Docker required)
-- **Network isolation** - Containers on isolated network with internet access
+- **Dual networking modes** - Bridged networking on physical hardware, isolated on VMs
 - **SSH access** - Password + SSH key authentication
 - **Resource limits** - CPU and memory limits via cgroups
 - **Launch scripts** - Pre-built scripts for docker, tailscale, claude
 - **Multi-OS support** - Debian and Alpine images
-- **Autostart** - Optional container autostart on boot
+- **Autostart** - Containers autostart on boot by default
+- **Docker support** - Run Docker inside containers
 
 ## Requirements
 
@@ -22,34 +23,44 @@ A simple, Lima-like container manager for Linux using LXC. Create isolated conta
 
 **Note:** macOS is not supported. LXC requires Linux kernel features. For testing on macOS, deploy inside a Lima VM.
 
-## Installation
+## Quick Installation
 
-### 1. Install dependencies
+One-line install (recommended):
 
 ```bash
-cd /path/to/nox
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/get-nox.sh | bash
 ```
 
-This will install LXC, Python3, and configure networking on your system.
-
-### 2. Install nox
+Or manual installation:
 
 ```bash
+git clone https://github.com/YOUR_USERNAME/nox.git
+cd nox
+sudo ./install.sh
 sudo cp nox.py /usr/local/bin/nox
 sudo chmod +x /usr/local/bin/nox
 ```
 
-### 3. Log out and back in
+## Quick Start
 
-This is required for group membership changes to take effect.
+```bash
+# Create a container
+nox create mycontainer --os debian
 
-## Usage
+# SSH into it (passwordless)
+nox ssh mycontainer
+
+# List containers
+nox list
+
+# Delete container
+nox delete mycontainer
+```
 
 ### Create a container
 
 ```bash
-# Basic container
+# Basic container (autostart enabled by default)
 nox create mycontainer
 
 # With specific OS and resources
@@ -59,8 +70,8 @@ nox create mycontainer --os debian --cpus 2 --ram 1024
 nox create mycontainer --script docker
 nox create mycontainer --script docker,tailscale,claude
 
-# With autostart
-nox create mycontainer --autostart
+# Disable autostart
+nox create mycontainer --no-autostart
 ```
 
 ### SSH into container
@@ -155,11 +166,19 @@ nox create mycontainer --script /path/to/script.sh
 
 ## Network
 
-Containers use LXC's default bridge network (`lxcbr0`) with:
+### Physical Hardware (Bridged Networking)
+On physical machines, containers get local network IPs from your router:
+- Accessible from any device on your LAN
+- Can SSH directly: `ssh nox@<container-ip>`
+- Full network connectivity like a separate device
+
+### Virtual Machines (Isolated Networking)
+In VMs (Lima, etc.), containers use isolated network (10.0.3.x):
 - Internet access via NAT
 - Isolated from host LAN
-- SSH access from host
-- DHCP-assigned IP addresses
+- SSH from host only
+
+The system automatically detects the environment and configures networking appropriately.
 
 ## Examples
 
@@ -168,6 +187,9 @@ Containers use LXC's default bridge network (`lxcbr0`) with:
 ```bash
 nox create dev --os debian --cpus 2 --ram 2048 --script docker
 nox ssh dev
+
+# Inside container, Docker is ready to use
+docker run hello-world
 ```
 
 ### Lightweight Alpine container
@@ -177,10 +199,23 @@ nox create alpine-test --os alpine --cpus 0.5 --ram 256
 nox ssh alpine-test
 ```
 
-### Container with autostart
+### Container without autostart
 
 ```bash
-nox create service --autostart --script docker
+nox create temp --no-autostart
+```
+
+### Running Docker inside nox container
+
+```bash
+# Create container with Docker
+nox create docker-host --script docker
+
+# SSH into it
+nox ssh docker-host
+
+# Run Docker containers inside
+docker run -d -p 8080:80 nginx
 ```
 
 ## Commands Reference
@@ -208,7 +243,7 @@ nox create service --autostart --script docker
 | `--ram N` | RAM limit in MB (fractional or absolute) | 512 |
 | `--disk N` | Disk size in GB (informational) | 5 |
 | `--script SCRIPTS` | Comma-separated launch scripts | none |
-| `--autostart` | Enable autostart on boot | false |
+| `--no-autostart` | Disable autostart on boot | false |
 | `--no-start` | Create but don't start | false |
 
 ## Files
@@ -266,12 +301,26 @@ ls /usr/share/lxc/templates/
 
 ### Memory limits not working
 
-Your kernel may not support cgroup memory limits. Check:
+Your system may not have the memory cgroup controller enabled. Check:
 ```bash
-grep CONFIG_MEMCG /boot/config-$(uname -r)
+cat /sys/fs/cgroup/cgroup.controllers
 ```
 
-CPU limits will still work even if memory limits are unavailable.
+If `memory` is not listed, memory limits will be skipped automatically. CPU limits will still work.
+
+### Containers not accessible from LAN
+
+If you're on physical hardware and containers aren't getting local network IPs:
+```bash
+# Check bridge configuration
+ip link show lxcbr0
+brctl show
+
+# Verify bridge is attached to physical interface
+sudo brctl show lxcbr0
+```
+
+On virtual machines (Lima, etc.), containers use isolated networking by design.
 
 ## Testing on macOS
 
@@ -303,10 +352,12 @@ nox ssh test
 
 - Uses LXC instead of Docker
 - Requires sudo for container operations
-- Uses LXC bridge (lxcbr0) instead of Docker networks
+- Dual networking: bridged on hardware, isolated in VMs
 - Resource limits via cgroups (both v1 and v2 supported)
 - Container storage in `/var/lib/lxc/`
 - More VM-like experience
+- Autostart enabled by default
+- Can run Docker inside containers
 
 ## License
 
