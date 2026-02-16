@@ -80,18 +80,17 @@ install_alpine() {
     # Configure NAT
     sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE || true
 
-    # Configure dnsmasq for DHCP
+    # Configure dnsmasq for DHCP only (disable DNS to avoid conflicts)
     sudo mkdir -p /etc/dnsmasq.d
 
-    # Disable local-service restriction
-    sudo sed -i 's/^local-service/#local-service/' /etc/dnsmasq.conf || true
-
-    sudo tee /etc/dnsmasq.d/lxc > /dev/null <<EOF
+    # Create LXC DHCP config - must have .conf extension
+    sudo tee /etc/dnsmasq.d/lxc.conf > /dev/null <<EOF
+port=0
 interface=lxcbr0
-bind-interfaces
 dhcp-range=10.0.3.2,10.0.3.254,12h
 dhcp-option=3,10.0.3.1
-dhcp-option=6,10.0.3.1
+dhcp-option=6,8.8.8.8
+dhcp-authoritative
 EOF
 
     # Start dnsmasq

@@ -246,11 +246,12 @@ def generate_setup_script(name, os_name, init_scripts=None, password=None):
                         continue
                     lines.append(line)
 
-    # Start SSH
+    # Start SSH and enable on boot
     if os_name == "debian":
         lines.append("service ssh start")
-    else:
-        lines.append("/usr/sbin/sshd")
+    else:  # alpine
+        lines.append("rc-update add sshd default")
+        lines.append("rc-service sshd start")
 
     lines.append("")
     return "\n".join(lines)
@@ -340,6 +341,23 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
     try:
         lxc_rootfs = os.path.join(LXC_PATH, name, "rootfs")
         run(f"sudo cp {setup_script_path} {lxc_rootfs}/tmp/setup.sh")
+
+        # Wait for network to be ready (especially for DHCP)
+        print("Waiting for network to be ready...")
+        time.sleep(5)
+
+        # Verify container has network connectivity before running setup
+        max_retries = 6
+        for i in range(max_retries):
+            try:
+                lxc(f"lxc-attach -n {name} -- ping -c 1 -W 2 8.8.8.8", check=True)
+                break
+            except:
+                if i < max_retries - 1:
+                    time.sleep(2)
+                else:
+                    print("Warning: Network connectivity check failed, proceeding anyway...")
+
         lxc(f"lxc-attach -n {name} -- sh /tmp/setup.sh")
     except RuntimeError as e:
         print(f"Failed to setup container: {e}", file=sys.stderr)
