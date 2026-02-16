@@ -28,7 +28,7 @@ A simple, Lima-like container manager for Linux using LXC. Create isolated conta
 One-line install (recommended):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/get-nox.sh | bash
+curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/install.sh | bash
 ```
 
 Or manual installation:
@@ -37,8 +37,6 @@ Or manual installation:
 git clone https://github.com/solosmith/nox.git
 cd nox
 sudo ./install.sh
-sudo cp nox.py /usr/local/bin/nox
-sudo chmod +x /usr/local/bin/nox
 ```
 
 ## Updating

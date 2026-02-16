@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# nox installer - Complete installation script
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -9,6 +10,22 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[nox]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[nox]${NC} $*"; }
 error() { echo -e "${RED}[nox]${NC} $*" >&2; }
+
+# Check if running on macOS
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    error "macOS is not supported. Please use a Linux system (Debian, Ubuntu, or Alpine)."
+    exit 1
+fi
+
+# Detect if running as root
+if [ "$EUID" -ne 0 ]; then
+    SUDO="sudo"
+else
+    SUDO=""
+fi
+
+info "Installing nox - LXC Container Manager"
+info "========================================"
 
 detect_distro() {
     if [ -f /etc/os-release ]; then
@@ -297,9 +314,6 @@ verify_install() {
 }
 
 main() {
-    info "nox dependency installer (LXC)"
-    info "=============================="
-
     local distro arch
     distro=$(detect_distro)
     arch=$(detect_arch)
@@ -321,11 +335,47 @@ main() {
     enable_user_lxc
     verify_install
 
+    # Download and install nox.py
     info ""
-    info "Done! You may need to log out and back in for group changes to take effect."
-    info "Or run: newgrp lxc"
+    info "Installing nox command..."
+
+    TEMP_DIR=$(mktemp -d)
+    cd "$TEMP_DIR"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/nox.py -o nox.py
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q https://raw.githubusercontent.com/solosmith/nox/main/nox.py -O nox.py
+    else
+        warn "Neither curl nor wget found. Please download nox.py manually."
+        warn "Visit: https://github.com/solosmith/nox"
+        cd /
+        rm -rf "$TEMP_DIR"
+        exit 0
+    fi
+
+    $SUDO cp nox.py /usr/local/bin/nox
+    $SUDO chmod +x /usr/local/bin/nox
+
+    cd /
+    rm -rf "$TEMP_DIR"
+
+    # Setup SSH key if not exists
+    if [ ! -f ~/.ssh/id_ed25519 ]; then
+        info "Generating SSH key for passwordless access..."
+        ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' -q
+    fi
+
     info ""
-    info "Note: LXC commands require sudo. The nox tool will use sudo automatically."
+    info "✓ nox installed successfully!"
+    info ""
+    info "Quick start:"
+    info "  nox create mycontainer --os debian"
+    info "  nox list"
+    info "  nox ssh mycontainer"
+    info ""
+    info "Update nox: nox update"
+    info "For more: https://github.com/solosmith/nox"
 }
 
 main "$@"
