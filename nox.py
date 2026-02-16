@@ -412,6 +412,14 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
         # Update bridge in config
         run(f"sudo sed -i 's/lxc.net.0.link = .*/lxc.net.0.link = {bridge}/' {config_path}")
 
+    # Configure DNS servers in LXC config
+    config_path = lxc_config_path(name)
+    run(f"sudo sh -c 'echo \"lxc.net.0.ipv4.gateway = auto\" >> {config_path}'")
+    run(f"sudo sh -c 'echo \"lxc.net.0.ipv4.address = dhcp\" >> {config_path}'")
+    # Set DNS servers that will be used by the container
+    run(f"sudo sh -c 'echo \"# DNS configuration\" >> {config_path}'")
+    run(f"sudo sh -c 'echo \"lxc.hook.start-host = /bin/sh -c \\\"echo nameserver 8.8.8.8 > /var/lib/lxc/{name}/rootfs/etc/resolv.conf\\\"\" >> {config_path}'")
+
     # Configure autostart
     if autostart:
         config_path = lxc_config_path(name)
@@ -426,17 +434,6 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
             print(f"Failed to start container: {e}", file=sys.stderr)
             lxc(f"lxc-destroy -n {name}", check=False)
             return False, None
-
-    # Configure DNS in container (using lxc-attach to run inside container)
-    if start:
-        try:
-            # Wait for container to be fully running
-            time.sleep(2)
-            # Configure DNS from inside the container
-            dns_config = "nameserver 8.8.8.8\\nnameserver 8.8.4.4"
-            lxc(f"lxc-attach -n {name} -- sh -c 'echo -e \"{dns_config}\" > /etc/resolv.conf'")
-        except Exception as e:
-            print(f"Warning: Failed to configure DNS: {e}", file=sys.stderr)
 
     # Generate and run setup script
     setup_script = generate_setup_script(name, os_name, init_scripts, password)
