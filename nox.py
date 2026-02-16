@@ -823,6 +823,7 @@ def cmd_update(args):
     """Update nox to the latest version from GitHub."""
     import tempfile
     import re
+    import time
 
     GITHUB_RAW_URL = "https://raw.githubusercontent.com/solosmith/nox/main"
 
@@ -831,13 +832,16 @@ def cmd_update(args):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
+            # Add cache-busting timestamp to avoid CDN caching issues
+            timestamp = int(time.time())
+
             # Download latest VERSION file and nox.py
             if run("command -v curl >/dev/null 2>&1", check=False).returncode == 0:
-                run(f"curl -fsSL {GITHUB_RAW_URL}/VERSION -o {tmpdir}/VERSION")
-                run(f"curl -fsSL {GITHUB_RAW_URL}/nox.py -o {tmpdir}/nox.py")
+                run(f"curl -H 'Cache-Control: no-cache' -fsSL '{GITHUB_RAW_URL}/VERSION?t={timestamp}' -o {tmpdir}/VERSION")
+                run(f"curl -H 'Cache-Control: no-cache' -fsSL '{GITHUB_RAW_URL}/nox.py?t={timestamp}' -o {tmpdir}/nox.py")
             elif run("command -v wget >/dev/null 2>&1", check=False).returncode == 0:
-                run(f"wget -q {GITHUB_RAW_URL}/VERSION -O {tmpdir}/VERSION")
-                run(f"wget -q {GITHUB_RAW_URL}/nox.py -O {tmpdir}/nox.py")
+                run(f"wget --no-cache -q '{GITHUB_RAW_URL}/VERSION?t={timestamp}' -O {tmpdir}/VERSION")
+                run(f"wget --no-cache -q '{GITHUB_RAW_URL}/nox.py?t={timestamp}' -O {tmpdir}/nox.py")
             else:
                 print("Error: Neither curl nor wget found.", file=sys.stderr)
                 sys.exit(1)
