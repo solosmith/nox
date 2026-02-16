@@ -344,8 +344,10 @@ main() {
 
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/nox.py -o nox.py
+        curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/VERSION -o VERSION
     elif command -v wget >/dev/null 2>&1; then
         wget -q https://raw.githubusercontent.com/solosmith/nox/main/nox.py -O nox.py
+        wget -q https://raw.githubusercontent.com/solosmith/nox/main/VERSION -O VERSION
     else
         warn "Neither curl nor wget found. Please download nox.py manually."
         warn "Visit: https://github.com/solosmith/nox"
@@ -356,6 +358,7 @@ main() {
 
     $SUDO cp nox.py /usr/local/bin/nox
     $SUDO chmod +x /usr/local/bin/nox
+    $SUDO cp VERSION /usr/local/bin/VERSION
 
     cd /
     rm -rf "$TEMP_DIR"

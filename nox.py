@@ -12,12 +12,20 @@ import time
 
 def get_version():
     """Read version from VERSION file."""
-    version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
-    try:
-        with open(version_file, "r") as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return "unknown"
+    # Try multiple locations for VERSION file
+    locations = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"),  # Same dir as script
+        "/usr/local/bin/VERSION",  # Installed location
+    ]
+
+    for version_file in locations:
+        try:
+            with open(version_file, "r") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            continue
+
+    return "unknown"
 
 VERSION = get_version()
 NOX_DIR = os.path.expanduser("~/.nox")
@@ -814,7 +822,7 @@ def cmd_update(args):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            # Download latest VERSION file
+            # Download latest VERSION file and nox.py
             if run("command -v curl >/dev/null 2>&1", check=False).returncode == 0:
                 run(f"curl -fsSL {GITHUB_RAW_URL}/VERSION -o {tmpdir}/VERSION")
                 run(f"curl -fsSL {GITHUB_RAW_URL}/nox.py -o {tmpdir}/nox.py")
@@ -837,6 +845,7 @@ def cmd_update(args):
             # Install updated version
             print("Installing updated version...")
             run(f"sudo cp {tmpdir}/nox.py /usr/local/bin/nox")
+            run(f"sudo cp {tmpdir}/VERSION /usr/local/bin/VERSION")
             run("sudo chmod +x /usr/local/bin/nox")
 
             print(f"✓ nox updated successfully! ({VERSION} → {remote_version})")
