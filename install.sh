@@ -31,6 +31,22 @@ detect_arch() {
     esac
 }
 
+is_virtualized() {
+    # Check if running in a VM or container
+    if [ -f /proc/cpuinfo ]; then
+        if grep -qi "hypervisor" /proc/cpuinfo; then
+            return 0
+        fi
+    fi
+    if systemd-detect-virt >/dev/null 2>&1; then
+        local virt=$(systemd-detect-virt)
+        if [ "$virt" != "none" ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
 install_debian() {
     info "Installing dependencies (Debian/Ubuntu)..."
     sudo apt-get update -qq
@@ -42,9 +58,71 @@ install_debian() {
         python3 \
         openssh-client
 
-    # Enable and configure lxc networking
-    sudo systemctl enable lxc-net || true
-    sudo systemctl start lxc-net || true
+    # Check if running in virtualized environment
+    if is_virtualized; then
+        warn "Detected virtualized environment - using isolated networking"
+        warn "For local network access, install on physical hardware"
+
+        # Use isolated bridge with NAT
+        if ! ip link show lxcbr0 >/dev/null 2>&1; then
+            info "Creating isolated bridge lxcbr0..."
+            sudo brctl addbr lxcbr0
+            sudo ip addr add 10.0.3.1/24 dev lxcbr0
+            sudo ip link set lxcbr0 up
+
+            # Setup NAT for internet access
+            PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+            sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 -o "$PRIMARY_IF" -j MASQUERADE
+            sudo iptables -A FORWARD -i lxcbr0 -o "$PRIMARY_IF" -j ACCEPT
+            sudo iptables -A FORWARD -i "$PRIMARY_IF" -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        fi
+    else
+        # Detect primary network interface
+        PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+        info "Detected primary interface: $PRIMARY_IF"
+
+        # Create bridge on physical interface for local network access
+        if ! ip link show lxcbr0 >/dev/null 2>&1; then
+            info "Creating bridge lxcbr0 on $PRIMARY_IF..."
+            sudo brctl addbr lxcbr0
+            sudo brctl addif lxcbr0 "$PRIMARY_IF"
+
+            # Get current IP config from primary interface
+            PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+            PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
+            PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
+
+            # Move IP from interface to bridge
+            if [ -n "$PRIMARY_IP" ]; then
+                sudo ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" || true
+                sudo ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
+            fi
+
+            sudo ip link set lxcbr0 up
+            sudo ip link set "$PRIMARY_IF" up
+
+            # Restore default route
+            if [ -n "$PRIMARY_GW" ]; then
+                sudo ip route add default via "$PRIMARY_GW" dev lxcbr0 || true
+            fi
+        fi
+    fi
+
+    # Enable IP forwarding
+    sudo sysctl -w net.ipv4.ip_forward=1
+    echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf >/dev/null
+
+    # Update LXC default config to use bridge
+    sudo tee /etc/lxc/default.conf > /dev/null <<EOF
+lxc.net.0.type = veth
+lxc.net.0.link = lxcbr0
+lxc.net.0.flags = up
+lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
+EOF
+
+    # Disable lxc-net service (we're using our own bridge)
+    sudo systemctl disable lxc-net || true
+    sudo systemctl stop lxc-net || true
 }
 
 install_alpine() {
@@ -54,7 +132,6 @@ install_alpine() {
         lxc-templates \
         lxc-download \
         bridge-utils \
-        dnsmasq \
         iptables \
         python3 \
         openssh-client
@@ -63,53 +140,89 @@ install_alpine() {
     sudo rc-update add lxc boot || true
     sudo service lxc start || true
 
-    # Configure LXC bridge networking for Alpine
-    info "Configuring LXC bridge networking..."
+    # Check if running in virtualized environment
+    if is_virtualized; then
+        warn "Detected virtualized environment - using isolated networking"
+        warn "For local network access, install on physical hardware"
 
-    # Create bridge
-    if ! ip link show lxcbr0 >/dev/null 2>&1; then
-        sudo brctl addbr lxcbr0
-        sudo ip addr add 10.0.3.1/24 dev lxcbr0
-        sudo ip link set lxcbr0 up
+        # Use isolated bridge with NAT
+        if ! ip link show lxcbr0 >/dev/null 2>&1; then
+            info "Creating isolated bridge lxcbr0..."
+            sudo brctl addbr lxcbr0
+            sudo ip addr add 10.0.3.1/24 dev lxcbr0
+            sudo ip link set lxcbr0 up
+
+            # Setup NAT for internet access
+            PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+            sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 -o "$PRIMARY_IF" -j MASQUERADE
+            sudo iptables -A FORWARD -i lxcbr0 -o "$PRIMARY_IF" -j ACCEPT
+            sudo iptables -A FORWARD -i "$PRIMARY_IF" -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+        fi
+    else
+        # Detect primary network interface
+        PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+        info "Detected primary interface: $PRIMARY_IF"
+
+        # Configure LXC bridge networking for Alpine
+        info "Configuring LXC bridge networking..."
+
+        # Create bridge on physical interface
+        if ! ip link show lxcbr0 >/dev/null 2>&1; then
+            info "Creating bridge lxcbr0 on $PRIMARY_IF..."
+            sudo brctl addbr lxcbr0
+            sudo brctl addif lxcbr0 "$PRIMARY_IF"
+
+            # Get current IP config from primary interface
+            PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+            PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
+            PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
+
+            # Move IP from interface to bridge
+            if [ -n "$PRIMARY_IP" ]; then
+                sudo ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" || true
+                sudo ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
+            fi
+
+            sudo ip link set lxcbr0 up
+            sudo ip link set "$PRIMARY_IF" up
+
+            # Restore default route
+            if [ -n "$PRIMARY_GW" ]; then
+                sudo ip route add default via "$PRIMARY_GW" dev lxcbr0 || true
+            fi
+        fi
     fi
 
     # Enable IP forwarding
     sudo sysctl -w net.ipv4.ip_forward=1
     echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf >/dev/null
 
-    # Configure NAT
-    sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE || true
-
-    # Configure dnsmasq for DHCP only (disable DNS to avoid conflicts)
-    sudo mkdir -p /etc/dnsmasq.d
-
-    # Create LXC DHCP config - must have .conf extension
-    sudo tee /etc/dnsmasq.d/lxc.conf > /dev/null <<EOF
-port=0
-interface=lxcbr0
-dhcp-range=10.0.3.2,10.0.3.254,12h
-dhcp-option=3,10.0.3.1
-dhcp-option=6,8.8.8.8
-dhcp-authoritative
-EOF
-
-    # Start dnsmasq
-    sudo rc-update add dnsmasq boot || true
-    sudo service dnsmasq restart || true
-
-    # Create bridge startup script
-    sudo tee /etc/local.d/lxc-bridge.start > /dev/null <<'EOF'
+    # Create bridge startup script for Alpine
+    if ! is_virtualized; then
+        sudo tee /etc/local.d/lxc-bridge.start > /dev/null <<'EOF'
 #!/bin/sh
+PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if ! ip link show lxcbr0 >/dev/null 2>&1; then
     brctl addbr lxcbr0
-    ip addr add 10.0.3.1/24 dev lxcbr0
+    brctl addif lxcbr0 "$PRIMARY_IF"
+    PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+    PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
+    if [ -n "$PRIMARY_IP" ]; then
+        ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" 2>/dev/null || true
+        ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
+    fi
     ip link set lxcbr0 up
+    ip link set "$PRIMARY_IF" up
+    PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
+    if [ -n "$PRIMARY_GW" ]; then
+        ip route add default via "$PRIMARY_GW" dev lxcbr0 2>/dev/null || true
+    fi
 fi
 sysctl -w net.ipv4.ip_forward=1
-iptables -t nat -A POSTROUTING -s 10.0.3.0/24 ! -d 10.0.3.0/24 -j MASQUERADE 2>/dev/null || true
 EOF
-    sudo chmod +x /etc/local.d/lxc-bridge.start
-    sudo rc-update add local boot || true
+        sudo chmod +x /etc/local.d/lxc-bridge.start
+        sudo rc-update add local boot || true
+    fi
 }
 
 configure_lxc() {

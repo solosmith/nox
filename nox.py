@@ -430,8 +430,12 @@ def cmd_create(args):
         print(f"\nSSH Access (password shown once):")
         print(f"  ssh nox@{ip}")
         print(f"  Password: {password}")
-        print(f"\nPasswordless access via nox:")
+        print(f"\nAccess from local network:")
+        print(f"  From any device on your LAN, use:")
+        print(f"  ssh nox@{ip}")
+        print(f"\nPasswordless access from host:")
         print(f"  nox ssh {args.name}")
+        print(f"\nIMPORTANT: Save this password - it won't be shown again!")
         print(f"{'='*60}\n")
     else:
         print(f"\nContainer '{args.name}' created but not started.")
