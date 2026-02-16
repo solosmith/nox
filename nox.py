@@ -10,6 +10,16 @@ import subprocess
 import sys
 import time
 
+def get_version():
+    """Read version from VERSION file."""
+    version_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION")
+    try:
+        with open(version_file, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "unknown"
+
+VERSION = get_version()
 NOX_DIR = os.path.expanduser("~/.nox")
 CONTAINERS_DIR = os.path.join(NOX_DIR, "containers")
 CONFIG_FILE = os.path.join(NOX_DIR, "config.json")
@@ -795,29 +805,41 @@ def cmd_install_deps(args):
 def cmd_update(args):
     """Update nox to the latest version from GitHub."""
     import tempfile
+    import re
 
     GITHUB_RAW_URL = "https://raw.githubusercontent.com/solosmith/nox/main"
 
-    print("Updating nox from GitHub...")
+    print(f"Current version: {VERSION}")
+    print("Checking for updates from GitHub...")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            # Download latest nox.py
-            print("Downloading latest nox.py...")
+            # Download latest VERSION file
             if run("command -v curl >/dev/null 2>&1", check=False).returncode == 0:
+                run(f"curl -fsSL {GITHUB_RAW_URL}/VERSION -o {tmpdir}/VERSION")
                 run(f"curl -fsSL {GITHUB_RAW_URL}/nox.py -o {tmpdir}/nox.py")
             elif run("command -v wget >/dev/null 2>&1", check=False).returncode == 0:
+                run(f"wget -q {GITHUB_RAW_URL}/VERSION -O {tmpdir}/VERSION")
                 run(f"wget -q {GITHUB_RAW_URL}/nox.py -O {tmpdir}/nox.py")
             else:
                 print("Error: Neither curl nor wget found.", file=sys.stderr)
                 sys.exit(1)
+
+            # Check version
+            with open(f"{tmpdir}/VERSION", "r") as f:
+                remote_version = f.read().strip()
+                print(f"Latest version: {remote_version}")
+
+                if remote_version == VERSION:
+                    print("✓ Already up to date!")
+                    return
 
             # Install updated version
             print("Installing updated version...")
             run(f"sudo cp {tmpdir}/nox.py /usr/local/bin/nox")
             run("sudo chmod +x /usr/local/bin/nox")
 
-            print("✓ nox updated successfully!")
+            print(f"✓ nox updated successfully! ({VERSION} → {remote_version})")
             print("\nTo update dependencies, run: nox install-deps")
 
         except Exception as e:

@@ -47,6 +47,8 @@ To update nox to the latest version:
 nox update
 ```
 
+The update command checks the current version against GitHub and only updates if a newer version is available. Version numbers are automatically bumped on each push to the main branch.
+
 ## Quick Start
 
 ```bash
