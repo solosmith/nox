@@ -2,6 +2,8 @@
 
 A simple, Lima-like container manager for Linux using LXC. Create isolated containers with SSH access, resource limits, and launch scripts.
 
+Current version: 1.0.0
+
 ## Features
 
 - **Simple CLI** - Easy-to-use commands for container management
