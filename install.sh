@@ -71,7 +71,6 @@ check_existing_installation() {
 }
 
 SKIP_DEPS=false
-UPDATE_MODE=false
 if check_existing_installation; then
     # Already up to date - ask if user wants to verify dependencies
     read -p "Verify and update dependencies if needed? [y/N] " -n 1 -r
@@ -80,9 +79,9 @@ if check_existing_installation; then
         SKIP_DEPS=true
     fi
 else
-    # Update available - always check dependencies
-    UPDATE_MODE=true
-    info "Update mode: will verify and update dependencies"
+    # Update available - install script always checks dependencies
+    # nox update command only updates the app
+    info "Will update nox and verify dependencies"
 fi
 
 detect_distro() {
@@ -132,12 +131,6 @@ install_debian() {
         debootstrap \
         python3 \
         openssh-client
-
-    # Upgrade existing packages if in update mode
-    if [ "$UPDATE_MODE" = true ]; then
-        info "Upgrading LXC and related packages..."
-        sudo apt-get upgrade -y -qq lxc lxc-templates bridge-utils
-    fi
 
     # Check if running in virtualized environment
     if is_virtualized; then
@@ -216,12 +209,6 @@ install_alpine() {
         iptables \
         python3 \
         openssh-client
-
-    # Upgrade existing packages if in update mode
-    if [ "$UPDATE_MODE" = true ]; then
-        info "Upgrading LXC and related packages..."
-        sudo apk upgrade lxc lxc-templates bridge-utils
-    fi
 
     # Enable lxc service
     sudo rc-update add lxc boot || true
