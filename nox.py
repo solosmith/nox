@@ -913,19 +913,19 @@ def main():
         "stop": cmd_stop,
         "restart": cmd_restart,
         "delete": cmd_delete,
+        "rm": cmd_delete,  # alias
         "list": cmd_list,
-        "ls": cmd_list,
+        "ls": cmd_list,  # alias
         "status": cmd_status,
         "autostart": cmd_autostart,
         "ssh": cmd_ssh,
         "run": cmd_run,
+        "exec": cmd_run,  # alias
         "images": cmd_images,
         "config": cmd_config,
         "install-deps": cmd_install_deps,
         "update": cmd_update,
-    }
-        "config": cmd_config,
-        "install-deps": cmd_install_deps,
+        "up": cmd_update,  # alias
     }
 
     fn = commands.get(args.command)
