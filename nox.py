@@ -325,8 +325,7 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
     # Configure autostart
     if autostart:
         config_path = lxc_config_path(name)
-        with open(config_path, 'a') as f:
-            f.write("lxc.start.auto = 1\n")
+        run(f"sudo sh -c 'echo \"lxc.start.auto = 1\" >> {config_path}'")
 
     # Start container
     if start:
@@ -419,7 +418,7 @@ def cmd_create(args):
     success, password = create_container(
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
         disk=args.disk, init_scripts=init_scripts if init_scripts else None,
-        autostart=getattr(args, "autostart", False),
+        autostart=not getattr(args, "no_autostart", False),
         start=not args.no_start
     )
 
@@ -729,7 +728,7 @@ def main():
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
     p.add_argument("--script", default=None, help="Comma-separated list of scripts (docker,tailscale,claude) or full paths")
-    p.add_argument("--autostart", action="store_true")
+    p.add_argument("--no-autostart", action="store_true", help="Disable autostart on boot")
     p.add_argument("--no-start", action="store_true", help="Create but don't start container")
 
     # start
