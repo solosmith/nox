@@ -862,6 +862,7 @@ def cmd_update(args):
 
 def main():
     parser = argparse.ArgumentParser(prog="nox", description="LXC Container Manager")
+    parser.add_argument("--version", action="version", version=f"nox {VERSION}")
     sub = parser.add_subparsers(dest="command")
 
     # create
