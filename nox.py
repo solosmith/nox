@@ -156,17 +156,27 @@ def set_resource_limits(name, vcpus, ram_mb):
     """Set cgroup resource limits for container."""
     config_path = lxc_config_path(name)
 
+    # Check which cgroup controllers are available
+    memory_available = False
+    try:
+        with open("/sys/fs/cgroup/cgroup.controllers", "r") as f:
+            controllers = f.read().strip()
+            memory_available = "memory" in controllers
+    except:
+        # If we can't read controllers, assume cgroup v1 or mixed
+        memory_available = True
+
     # Build resource limit lines
     limits = []
-    # CPU shares (cgroup v1) - 1024 shares per CPU
+    # CPU limits (works on both cgroup v1 and v2)
     limits.append(f"lxc.cgroup.cpu.shares = {vcpus * 1024}")
-    # CPU max (cgroup v2) - quota/period format
     limits.append(f"lxc.cgroup2.cpu.max = {vcpus * 100000} 100000")
 
-    # Memory limit
-    ram_bytes = ram_mb * 1024 * 1024
-    limits.append(f"lxc.cgroup.memory.limit_in_bytes = {ram_bytes}")
-    limits.append(f"lxc.cgroup2.memory.max = {ram_bytes}")
+    # Memory limit (only if controller is available)
+    if memory_available:
+        ram_bytes = ram_mb * 1024 * 1024
+        limits.append(f"lxc.cgroup.memory.limit_in_bytes = {ram_bytes}")
+        limits.append(f"lxc.cgroup2.memory.max = {ram_bytes}")
 
     # Use sudo to read, modify, and write config
     for limit in limits:
