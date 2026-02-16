@@ -33,11 +33,11 @@ cd "$TEMP_DIR"
 
 info "Downloading nox from GitHub..."
 if command -v curl >/dev/null 2>&1; then
-    curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/install.sh -o install.sh
-    curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/nox.py -o nox.py
+    curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/install.sh -o install.sh
+    curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/nox.py -o nox.py
 elif command -v wget >/dev/null 2>&1; then
-    wget -q https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/install.sh -O install.sh
-    wget -q https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/nox.py -O nox.py
+    wget -q https://raw.githubusercontent.com/solosmith/nox/main/install.sh -O install.sh
+    wget -q https://raw.githubusercontent.com/solosmith/nox/main/nox.py -O nox.py
 else
     error "Neither curl nor wget found. Please install one of them."
     exit 1
@@ -68,4 +68,4 @@ info "  nox create mycontainer --os debian"
 info "  nox list"
 info "  nox ssh mycontainer"
 info ""
-info "For more information, visit: https://github.com/YOUR_USERNAME/nox"
+info "For more information, visit: https://github.com/solosmith/nox"

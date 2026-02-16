@@ -792,6 +792,39 @@ def cmd_install_deps(args):
         sys.exit(1)
 
 
+def cmd_update(args):
+    """Update nox to the latest version from GitHub."""
+    import tempfile
+
+    GITHUB_RAW_URL = "https://raw.githubusercontent.com/solosmith/nox/main"
+
+    print("Updating nox from GitHub...")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            # Download latest nox.py
+            print("Downloading latest nox.py...")
+            if run("command -v curl >/dev/null 2>&1", check=False).returncode == 0:
+                run(f"curl -fsSL {GITHUB_RAW_URL}/nox.py -o {tmpdir}/nox.py")
+            elif run("command -v wget >/dev/null 2>&1", check=False).returncode == 0:
+                run(f"wget -q {GITHUB_RAW_URL}/nox.py -O {tmpdir}/nox.py")
+            else:
+                print("Error: Neither curl nor wget found.", file=sys.stderr)
+                sys.exit(1)
+
+            # Install updated version
+            print("Installing updated version...")
+            run(f"sudo cp {tmpdir}/nox.py /usr/local/bin/nox")
+            run("sudo chmod +x /usr/local/bin/nox")
+
+            print("✓ nox updated successfully!")
+            print("\nTo update dependencies, run: nox install-deps")
+
+        except Exception as e:
+            print(f"Error updating nox: {e}", file=sys.stderr)
+            sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -863,6 +896,9 @@ def main():
     # install-deps
     sub.add_parser("install-deps", help="Install LXC dependencies")
 
+    # update
+    sub.add_parser("update", help="Update nox to the latest version from GitHub")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -884,6 +920,10 @@ def main():
         "ssh": cmd_ssh,
         "run": cmd_run,
         "images": cmd_images,
+        "config": cmd_config,
+        "install-deps": cmd_install_deps,
+        "update": cmd_update,
+    }
         "config": cmd_config,
         "install-deps": cmd_install_deps,
     }

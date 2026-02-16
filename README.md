@@ -28,17 +28,25 @@ A simple, Lima-like container manager for Linux using LXC. Create isolated conta
 One-line install (recommended):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/nox/main/get-nox.sh | bash
+curl -fsSL https://raw.githubusercontent.com/solosmith/nox/main/get-nox.sh | bash
 ```
 
 Or manual installation:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/nox.git
+git clone https://github.com/solosmith/nox.git
 cd nox
 sudo ./install.sh
 sudo cp nox.py /usr/local/bin/nox
 sudo chmod +x /usr/local/bin/nox
+```
+
+## Updating
+
+To update nox to the latest version:
+
+```bash
+nox update
 ```
 
 ## Quick Start
@@ -233,6 +241,7 @@ docker run -d -p 8080:80 nginx
 | `nox autostart NAME --enable/--disable` | Manage autostart |
 | `nox config get/set KEY [VALUE]` | Manage configuration |
 | `nox images` | List available images |
+| `nox update` | Update nox to latest version |
 
 ## Options
 
