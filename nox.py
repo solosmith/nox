@@ -171,9 +171,11 @@ def vm_ip(name, timeout=60):
                         if "/" in part:  # IP with CIDR
                             return part.split("/")[0]
 
-        # Fallback: scan network to populate ARP table, then check for MAC address
-        # Ping broadcast to discover devices on the network
-        run("ping -c 1 -b 10.0.0.255 >/dev/null 2>&1 || true", check=False, capture=False)
+        # Fallback: scan network range to populate ARP table, then check for MAC address
+        # Use nmap or arping if available, otherwise ping sweep
+        run("command -v nmap >/dev/null 2>&1 && nmap -sn 10.0.0.0/24 >/dev/null 2>&1 || "
+            "for i in {1..254}; do ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 & done; wait",
+            check=False, capture=False)
 
         result = run("ip neigh show", check=False, capture=True)
         if result.returncode == 0:
