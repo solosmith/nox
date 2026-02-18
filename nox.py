@@ -144,6 +144,10 @@ def vm_ip(name, timeout=60):
     """Get VM IP address."""
     deadline = time.time() + timeout
 
+    # Wait for VM to boot before checking for IP (cloud-init takes time)
+    print("Waiting for VM to boot (60 seconds)...")
+    time.sleep(60)
+
     # Get VM MAC address
     result = virsh(f"domiflist {name}", check=False)
     if result.returncode != 0:
@@ -193,7 +197,7 @@ def vm_ip(name, timeout=60):
                     if len(parts) >= 1:
                         return parts[0]
 
-        time.sleep(2)
+        time.sleep(10)
 
     return None
 
