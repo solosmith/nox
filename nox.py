@@ -398,8 +398,8 @@ def cmd_create(args):
     # Wait for IP if started
     if not args.no_start:
         print("\nWaiting for VM to boot and get IP address...")
-        print("(This may take 30-60 seconds for first boot)")
-        ip = vm_ip(args.name, timeout=120)
+        print("(This may take 2-3 minutes for first boot)")
+        ip = vm_ip(args.name, timeout=240)
 
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
