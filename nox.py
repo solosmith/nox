@@ -291,18 +291,17 @@ def get_available_bridges():
     try:
         result = run("ip -4 addr show", check=False, capture=True)
         current_interface = None
-        current_ip = None
 
         for line in result.stdout.splitlines():
-            line = line.strip()
-            # Look for network interfaces
+            line_stripped = line.strip()
+            # Look for network interfaces (lines that don't start with space)
             if line and not line.startswith(' '):
-                parts = line.split(':')
+                parts = line_stripped.split(':')
                 if len(parts) >= 2:
                     current_interface = parts[1].strip().split('@')[0]
-            # Look for inet addresses
-            elif line.startswith('inet '):
-                parts = line.split()
+            # Look for inet addresses (indented lines)
+            elif line_stripped.startswith('inet '):
+                parts = line_stripped.split()
                 if len(parts) >= 2:
                     ip_cidr = parts[1]
                     ip = ip_cidr.split('/')[0]
@@ -335,19 +334,20 @@ def select_network_bridge():
     bridges = get_available_bridges()
 
     if not bridges:
-        print("No network bridges found. Using default br0.")
-        return "br0"
+        print("No network interfaces found.")
+        return None
 
     if len(bridges) == 1:
+        print(f"Using network: {bridges[0]['bridge']} ({bridges[0]['subnet']}.0/24)")
         return bridges[0]['bridge']
 
-    print("\nAvailable network bridges:")
+    print("\nAvailable networks:")
     for i, bridge in enumerate(bridges, 1):
-        print(f"  {i}. {bridge['bridge']:<15} (subnet: {bridge['subnet']}/24, IP: {bridge['ip']})")
+        print(f"  {i}. {bridge['bridge']:<15} - {bridge['subnet']}.0/24 (host IP: {bridge['ip']})")
 
     while True:
         try:
-            choice = input("\nSelect bridge number (or press Enter for default): ").strip()
+            choice = input("\nSelect network (1-{}, or Enter for #1): ".format(len(bridges))).strip()
             if not choice:
                 return bridges[0]['bridge']
 
@@ -357,7 +357,7 @@ def select_network_bridge():
             else:
                 print(f"Please enter a number between 1 and {len(bridges)}")
         except (ValueError, KeyboardInterrupt):
-            print("\nUsing default bridge")
+            print("\nUsing first network")
             return bridges[0]['bridge']
 
 
@@ -509,16 +509,22 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
 
 def cmd_create(args):
     """Create a new container and show SSH credentials."""
-    # Select network bridge if interactive mode
+    # Always select network bridge in interactive mode
     bridge = None
     if not args.no_start and sys.stdin.isatty():
         bridge = select_network_bridge()
-        if bridge and bridge != "br0":
-            print(f"Using bridge: {bridge}")
+        if bridge:
+            print(f"Using network: {bridge}")
 
-    # Use br0 as default if no bridge selected
+    # If not interactive or no selection, use first available bridge
     if not bridge:
-        bridge = "br0"
+        bridges = get_available_bridges()
+        if bridges:
+            bridge = bridges[0]['bridge']
+            print(f"Using default network: {bridge}")
+        else:
+            print("Warning: No network interfaces found. Container may not have network access.")
+            bridge = "br0"  # Fallback
 
     # Resolve init scripts
     init_scripts = []
