@@ -44,12 +44,10 @@ OS_IMAGES = {
         "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2",
         "url_amd64": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2",
     },
-    # Additional OS images can be added here in the future
-    # Example:
-    # "alpine": {
-    #     "url": "https://...",
-    #     "url_amd64": "https://...",
-    # },
+    "alpine": {
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/cloud/nocloud_alpine-3.19.9-aarch64-uefi-cloudinit-r0.qcow2",
+        "url_amd64": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/cloud/nocloud_alpine-3.19.9-x86_64-bios-cloudinit-r0.qcow2",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -199,7 +197,7 @@ def generate_password():
 # Cloud-init generation
 # ---------------------------------------------------------------------------
 
-def generate_cloud_init(name, password, ssh_key=None):
+def generate_cloud_init(name, password, ssh_key=None, os_name="debian"):
     """Generate cloud-init user-data."""
     # Find SSH public key
     if not ssh_key:
@@ -210,6 +208,26 @@ def generate_cloud_init(name, password, ssh_key=None):
                     ssh_key = f.read().strip()
                 break
 
+    # OS-specific configuration
+    if os_name == "alpine":
+        # Alpine uses ash shell and wheel group
+        shell = "/bin/ash"
+        groups = "wheel"
+        runcmd = [
+            "apk update",
+            "apk add openssh sudo curl bash",
+            "rc-update add sshd",
+            "rc-service sshd start",
+        ]
+    else:
+        # Debian/Ubuntu use bash and sudo group
+        shell = "/bin/bash"
+        groups = "sudo"
+        runcmd = [
+            "systemctl enable ssh",
+            "systemctl start ssh",
+        ]
+
     user_data = f"""#cloud-config
 hostname: {name}
 fqdn: {name}.local
@@ -218,8 +236,8 @@ manage_etc_hosts: true
 users:
   - name: nox
     sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: sudo
-    shell: /bin/bash
+    groups: {groups}
+    shell: {shell}
     lock_passwd: false
     passwd: {password}
     ssh_authorized_keys:
@@ -232,23 +250,15 @@ network:
       dhcp4: true
       dhcp6: false
 
-package_update: true
+package_update: false
 package_upgrade: false
 
-packages:
-  - openssh-server
-  - sudo
-  - curl
-
 runcmd:
-  - systemctl enable ssh
-  - systemctl start ssh
-
-power_state:
-  mode: reboot
-  timeout: 300
-  condition: True
 """
+
+    # Add OS-specific commands
+    for cmd in runcmd:
+        user_data += f"  - {cmd}\n"
 
     meta_data = f"""instance-id: {name}
 local-hostname: {name}
@@ -318,7 +328,7 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
     run(f"qemu-img create -f qcow2 -F qcow2 -b {base_image} {disk_path} {disk_gb}G")
 
     # Generate cloud-init
-    user_data, meta_data = generate_cloud_init(name, password)
+    user_data, meta_data = generate_cloud_init(name, password, os_name=os_name)
     user_data_path = os.path.join(vm_path, "user-data")
     meta_data_path = os.path.join(vm_path, "meta-data")
 
@@ -337,10 +347,11 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
         --name {name} \\
         --memory {ram_mb} \\
         --vcpus {vcpus} \\
-        --disk {disk_path},format=qcow2 \\
+        --cpu host-passthrough \\
+        --disk {disk_path},format=qcow2,bus=virtio,cache=writeback,io=threads \\
         --disk {cloud_init_iso},device=cdrom \\
         --os-variant generic \\
-        --network network={network} \\
+        --network network={network},model=virtio \\
         --graphics none \\
         --console pty,target_type=serial \\
         --import \\
@@ -584,7 +595,7 @@ def main():
     # create
     p = sub.add_parser("create", help="Create a new VM")
     p.add_argument("name")
-    p.add_argument("--os", choices=["debian"], default=None)
+    p.add_argument("--os", choices=["debian", "alpine"], default=None)
     p.add_argument("--cpus", type=float, default=None)
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
