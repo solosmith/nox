@@ -161,16 +161,24 @@ def vm_ip(name, timeout=60):
         return None
 
     while time.time() < deadline:
-        # Use nmap to scan and match MAC address directly from its output
-        result = run(f"nmap -sn 10.0.0.0/24", check=False, capture=True)
+        # Fast path: virsh ARP table (works if host has communicated with VM)
+        result = virsh(f"domifaddr {name} --source arp", check=False)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if "ipv4" in line.lower():
+                    parts = line.split()
+                    for part in parts:
+                        if "/" in part:
+                            return part.split("/")[0]
+
+        # Slow path: nmap scan to discover VM on the network
+        result = run("nmap -sn 10.0.0.0/24", check=False, capture=True)
         if result.returncode == 0:
             lines = result.stdout.splitlines()
             for i, line in enumerate(lines):
                 if mac_address.upper() in line.upper():
-                    # IP is on the line before the MAC line
                     for prev in range(i - 1, -1, -1):
                         if "Nmap scan report for" in lines[prev]:
-                            # Extract IP from "Nmap scan report for hostname (IP)" or "Nmap scan report for IP"
                             report = lines[prev]
                             if "(" in report:
                                 return report.split("(")[1].rstrip(")")
@@ -220,7 +228,7 @@ users:
 network:
   version: 2
   ethernets:
-    eth0:
+    enp1s0:
       dhcp4: true
       dhcp6: false
 
