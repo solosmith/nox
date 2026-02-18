@@ -44,10 +44,6 @@ OS_IMAGES = {
         "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-arm64.qcow2",
         "url_amd64": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2",
     },
-    "alpine": {
-        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/aarch64/alpine-virt-3.19.0-aarch64.iso",
-        "url_amd64": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/alpine-virt-3.19.0-x86_64.iso",
-    },
 }
 
 # ---------------------------------------------------------------------------
@@ -582,7 +578,7 @@ def main():
     # create
     p = sub.add_parser("create", help="Create a new VM")
     p.add_argument("name")
-    p.add_argument("--os", choices=["alpine", "debian"], default=None)
+    p.add_argument("--os", choices=["debian"], default=None)
     p.add_argument("--cpus", type=float, default=None)
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
