@@ -171,7 +171,10 @@ def vm_ip(name, timeout=60):
                         if "/" in part:  # IP with CIDR
                             return part.split("/")[0]
 
-        # Fallback: scan ARP table for MAC address
+        # Fallback: scan network to populate ARP table, then check for MAC address
+        # Ping broadcast to discover devices on the network
+        run("ping -c 1 -b 10.0.0.255 >/dev/null 2>&1 || true", check=False, capture=False)
+
         result = run("ip neigh show", check=False, capture=True)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -387,19 +390,22 @@ def cmd_create(args):
         print("\nWaiting for VM to boot and get IP address...")
         print("(This may take 30-60 seconds for first boot)")
         ip = vm_ip(args.name, timeout=120)
-        if not ip:
-            print("Could not get VM IP address. Check 'nox status' later.")
-            return
 
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
         print(f"{'='*60}")
         print(f"\nSSH Access (password shown once):")
-        print(f"  ssh nox@{ip}")
+        if ip:
+            print(f"  ssh nox@{ip}")
+        else:
+            print(f"  IP address not detected yet. Use 'nox list' to find it.")
         print(f"  Password: {password}")
         print(f"\nAccess from local network:")
-        print(f"  From any device on your LAN, use:")
-        print(f"  ssh nox@{ip}")
+        if ip:
+            print(f"  From any device on your LAN, use:")
+            print(f"  ssh nox@{ip}")
+        else:
+            print(f"  Once IP is available, you can SSH from any device on your LAN")
         print(f"\nPasswordless access from host:")
         print(f"  nox ssh {args.name}")
         print(f"\nIMPORTANT: Save this password - it won't be shown again!")
