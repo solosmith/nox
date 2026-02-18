@@ -440,7 +440,7 @@ def cmd_delete(args):
     if state == "running":
         virsh(f"destroy {args.name}")
 
-    virsh(f"undefine {args.name} --remove-all-storage")
+    virsh(f"undefine {args.name} --nvram --remove-all-storage")
     d = vm_dir(args.name)
     if os.path.exists(d):
         shutil.rmtree(d)
