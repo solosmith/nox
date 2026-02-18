@@ -142,11 +142,12 @@ def save_meta(name, meta):
 
 def vm_ip(name, timeout=60):
     """Get VM IP address."""
-    deadline = time.time() + timeout
-
     # Wait for VM to boot before checking for IP (cloud-init takes time)
     print("Waiting for VM to boot (60 seconds)...")
     time.sleep(60)
+
+    # Set deadline after initial wait
+    deadline = time.time() + timeout
 
     # Get VM MAC address
     result = virsh(f"domiflist {name}", check=False)
