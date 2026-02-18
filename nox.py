@@ -141,52 +141,20 @@ def save_meta(name, meta):
         json.dump(meta, f, indent=2)
 
 def vm_ip(name, timeout=60):
-    """Get VM IP address."""
+    """Get VM IP address using qemu-guest-agent."""
     deadline = time.time() + timeout
 
-    # Get VM MAC address
-    result = virsh(f"domiflist {name}", check=False)
-    if result.returncode != 0:
-        return None
-
-    mac_address = None
-    for line in result.stdout.splitlines():
-        if "bridge" in line.lower() or "network" in line.lower():
-            parts = line.split()
-            if len(parts) >= 5:
-                mac_address = parts[4]
-                break
-
-    if not mac_address:
-        return None
-
     while time.time() < deadline:
-        # Fast path: virsh ARP table (works if host has communicated with VM)
-        result = virsh(f"domifaddr {name} --source arp", check=False)
+        result = virsh(f"domifaddr {name} --source agent", check=False)
         if result.returncode == 0:
             for line in result.stdout.splitlines():
-                if "ipv4" in line.lower():
+                if "ipv4" in line.lower() and "127.0.0.1" not in line:
                     parts = line.split()
                     for part in parts:
-                        if "/" in part:
+                        if "/" in part and not part.startswith("127."):
                             return part.split("/")[0]
 
-        # Slow path: nmap scan to discover VM on the network
-        result = run("nmap -sn 10.0.0.0/24", check=False, capture=True)
-        if result.returncode == 0:
-            lines = result.stdout.splitlines()
-            for i, line in enumerate(lines):
-                if mac_address.upper() in line.upper():
-                    for prev in range(i - 1, -1, -1):
-                        if "Nmap scan report for" in lines[prev]:
-                            report = lines[prev]
-                            if "(" in report:
-                                return report.split("(")[1].rstrip(")")
-                            else:
-                                return report.split()[-1]
-                            break
-
-        time.sleep(5)
+        time.sleep(2)
 
     return None
 
@@ -225,17 +193,17 @@ users:
     ssh_authorized_keys:
       - {ssh_key if ssh_key else ''}
 
-network:
-  version: 2
-  ethernets:
-    enp1s0:
-      dhcp4: true
-      dhcp6: false
+ssh_pwauth: true
 
-package_update: false
+package_update: true
 package_upgrade: false
+packages:
+  - qemu-guest-agent
 
 runcmd:
+  - echo 'nox:{password}' | chpasswd
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
   - systemctl enable ssh
   - systemctl start ssh
 """
@@ -390,11 +358,8 @@ def cmd_create(args):
 
     # Wait for IP if started
     if not args.no_start:
-        print("\nWaiting for VM to boot (90 seconds)...")
-        time.sleep(90)
-
-        print("Scanning network for VM IP address...")
-        ip = vm_ip(args.name, timeout=30)
+        print("\nWaiting for VM to boot and get IP address...")
+        ip = vm_ip(args.name, timeout=180)
 
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
