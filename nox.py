@@ -140,11 +140,12 @@ def save_meta(name, meta):
     with open(meta_path(name), "w") as f:
         json.dump(meta, f, indent=2)
 
-def vm_ip(name, timeout=60):
+def vm_ip(name, timeout=60, wait_for_boot=False):
     """Get VM IP address."""
-    # Wait for VM to boot before checking for IP (cloud-init takes time)
-    print("Waiting for VM to boot (60 seconds)...")
-    time.sleep(60)
+    # Optional wait for VM to boot (only used during creation)
+    if wait_for_boot:
+        print("Waiting for VM to boot (60 seconds)...")
+        time.sleep(60)
 
     # Set deadline after initial wait
     deadline = time.time() + timeout
@@ -404,7 +405,7 @@ def cmd_create(args):
     if not args.no_start:
         print("\nWaiting for VM to boot and get IP address...")
         print("(This may take 2-3 minutes for first boot)")
-        ip = vm_ip(args.name, timeout=240)
+        ip = vm_ip(args.name, timeout=240, wait_for_boot=True)
 
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
