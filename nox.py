@@ -172,10 +172,18 @@ def vm_ip(name, timeout=60):
                             return part.split("/")[0]
 
         # Fallback: scan network range to populate ARP table, then check for MAC address
-        # Use nmap or arping if available, otherwise ping sweep
-        run("command -v nmap >/dev/null 2>&1 && nmap -sn 10.0.0.0/24 >/dev/null 2>&1 || "
-            "for i in {1..254}; do ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 & done; wait",
-            check=False, capture=False)
+        # Use nmap if available for faster scanning, otherwise ping sweep
+        scan_cmd = """
+        if command -v nmap >/dev/null 2>&1; then
+            nmap -sn 10.0.0.0/24 >/dev/null 2>&1
+        else
+            for i in $(seq 1 254); do
+                ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 &
+            done
+            wait
+        fi
+        """
+        run(scan_cmd, check=False, capture=False)
 
         result = run("ip neigh show", check=False, capture=True)
         if result.returncode == 0:
