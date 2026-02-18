@@ -407,21 +407,31 @@ def cmd_create(args):
         print("(This may take 2-3 minutes for first boot)")
         ip = vm_ip(args.name, timeout=240, wait_for_boot=True)
 
+        # If IP detection failed, do one final scan attempt
+        if not ip:
+            print("Performing final network scan...")
+            run("nmap -sn 10.0.0.0/24 >/dev/null 2>&1 || (for i in $(seq 1 254); do ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 & done; wait)", check=False, capture=False)
+            time.sleep(2)
+            ip = vm_ip(args.name, timeout=5, wait_for_boot=False)
+
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
         print(f"{'='*60}")
         print(f"\nSSH Access (password shown once):")
         if ip:
             print(f"  ssh nox@{ip}")
+            print(f"  Password: {password}")
         else:
-            print(f"  IP address not detected yet. Use 'nox list' to find it.")
-        print(f"  Password: {password}")
+            print(f"  IP address not detected yet.")
+            print(f"  Password: {password}")
+            print(f"  Use 'nox list' to find the IP address, then:")
+            print(f"  ssh nox@<IP_ADDRESS>")
         print(f"\nAccess from local network:")
         if ip:
-            print(f"  From any device on your LAN, use:")
+            print(f"  From any device on your LAN:")
             print(f"  ssh nox@{ip}")
         else:
-            print(f"  Once IP is available, you can SSH from any device on your LAN")
+            print(f"  Once you have the IP, you can SSH from any device on your LAN")
         print(f"\nPasswordless access from host:")
         print(f"  nox ssh {args.name}")
         print(f"\nIMPORTANT: Save this password - it won't be shown again!")
