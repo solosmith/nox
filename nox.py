@@ -44,10 +44,6 @@ OS_IMAGES = {
         "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2",
         "url_amd64": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2",
     },
-    "alpine": {
-        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/cloud/nocloud_alpine-3.19.9-aarch64-uefi-cloudinit-r0.qcow2",
-        "url_amd64": "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/cloud/nocloud_alpine-3.19.9-x86_64-bios-cloudinit-r0.qcow2",
-    },
 }
 
 # ---------------------------------------------------------------------------
@@ -208,26 +204,6 @@ def generate_cloud_init(name, password, ssh_key=None, os_name="debian"):
                     ssh_key = f.read().strip()
                 break
 
-    # OS-specific configuration
-    if os_name == "alpine":
-        # Alpine uses ash shell and wheel group
-        shell = "/bin/ash"
-        groups = "wheel"
-        runcmd = [
-            "apk update",
-            "apk add openssh sudo curl bash",
-            "rc-update add sshd",
-            "rc-service sshd start",
-        ]
-    else:
-        # Debian/Ubuntu use bash and sudo group
-        shell = "/bin/bash"
-        groups = "sudo"
-        runcmd = [
-            "systemctl enable ssh",
-            "systemctl start ssh",
-        ]
-
     user_data = f"""#cloud-config
 hostname: {name}
 fqdn: {name}.local
@@ -236,8 +212,8 @@ manage_etc_hosts: true
 users:
   - name: nox
     sudo: ALL=(ALL) NOPASSWD:ALL
-    groups: {groups}
-    shell: {shell}
+    groups: sudo
+    shell: /bin/bash
     lock_passwd: false
     passwd: {password}
     ssh_authorized_keys:
@@ -254,11 +230,9 @@ package_update: false
 package_upgrade: false
 
 runcmd:
+  - systemctl enable ssh
+  - systemctl start ssh
 """
-
-    # Add OS-specific commands
-    for cmd in runcmd:
-        user_data += f"  - {cmd}\n"
 
     meta_data = f"""instance-id: {name}
 local-hostname: {name}
@@ -595,7 +569,7 @@ def main():
     # create
     p = sub.add_parser("create", help="Create a new VM")
     p.add_argument("name")
-    p.add_argument("--os", choices=["debian", "alpine"], default=None)
+    p.add_argument("--os", choices=["debian"], default=None)
     p.add_argument("--cpus", type=float, default=None)
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
