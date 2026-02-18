@@ -30,6 +30,7 @@ def get_version():
 VERSION = get_version()
 NOX_DIR = os.path.expanduser("~/.nox")
 VMS_DIR = os.path.join(NOX_DIR, "vms")
+IMAGES_DIR = os.path.join(NOX_DIR, "images")
 CONFIG_FILE = os.path.join(NOX_DIR, "config.json")
 
 DEFAULT_CONFIG = {
@@ -55,6 +56,7 @@ OS_IMAGES = {
 
 def ensure_dirs():
     os.makedirs(VMS_DIR, exist_ok=True)
+    os.makedirs(IMAGES_DIR, exist_ok=True)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -285,7 +287,7 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
     vm_path = vm_dir(name)
     os.makedirs(vm_path, exist_ok=True)
 
-    # Download cloud image
+    # Download cloud image to shared cache
     os_info = OS_IMAGES.get(os_name)
     if not os_info:
         raise RuntimeError(f"Unknown OS: {os_name}")
@@ -299,9 +301,15 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
     if not image_url:
         raise RuntimeError(f"No image URL for {os_name} on {arch}")
 
-    print(f"Downloading {os_name} cloud image...")
-    base_image = os.path.join(vm_path, "base.qcow2")
-    run(f"curl -fsSL {image_url} -o {base_image}")
+    # Use shared image cache
+    image_filename = f"{os_name}-{arch}.qcow2"
+    base_image = os.path.join(IMAGES_DIR, image_filename)
+
+    if not os.path.exists(base_image):
+        print(f"Downloading {os_name} cloud image...")
+        run(f"curl -fsSL {image_url} -o {base_image}")
+    else:
+        print(f"Using cached {os_name} cloud image")
 
     # Create disk image from base
     disk_path = os.path.join(vm_path, f"{name}.qcow2")
