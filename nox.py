@@ -290,27 +290,37 @@ def get_available_bridges():
     bridges = []
     try:
         result = run("ip -4 addr show", check=False, capture=True)
-        current_bridge = None
+        current_interface = None
         current_ip = None
 
         for line in result.stdout.splitlines():
             line = line.strip()
-            # Look for bridge interfaces
+            # Look for network interfaces
             if line and not line.startswith(' '):
                 parts = line.split(':')
                 if len(parts) >= 2:
-                    current_bridge = parts[1].strip().split('@')[0]
+                    current_interface = parts[1].strip().split('@')[0]
             # Look for inet addresses
             elif line.startswith('inet '):
                 parts = line.split()
                 if len(parts) >= 2:
                     ip_cidr = parts[1]
                     ip = ip_cidr.split('/')[0]
+                    # Skip loopback
+                    if ip.startswith('127.'):
+                        continue
                     # Extract subnet (first 3 octets)
                     subnet = '.'.join(ip.split('.')[:3]) + '.0'
-                    if current_bridge and 'br' in current_bridge.lower() or 'lxc' in current_bridge.lower():
+                    # Include bridges, docker networks, and main ethernet interfaces
+                    if current_interface and (
+                        'br' in current_interface.lower() or
+                        'lxc' in current_interface.lower() or
+                        'docker' in current_interface.lower() or
+                        'eth' in current_interface.lower() or
+                        'virbr' in current_interface.lower()
+                    ):
                         bridges.append({
-                            'bridge': current_bridge,
+                            'bridge': current_interface,
                             'ip': ip,
                             'subnet': subnet
                         })
@@ -325,8 +335,8 @@ def select_network_bridge():
     bridges = get_available_bridges()
 
     if not bridges:
-        print("No network bridges found. Using default lxcbr0.")
-        return "lxcbr0"
+        print("No network bridges found. Using default br0.")
+        return "br0"
 
     if len(bridges) == 1:
         return bridges[0]['bridge']
@@ -427,6 +437,14 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
             lxc(f"lxc-destroy -n {name}", check=False)
             return False, None
 
+        # Configure DNS in container
+        # Use Google DNS instead of host DNS (which might be Tailscale or other VPN DNS)
+        try:
+            dns_config = "nameserver 8.8.8.8\\nnameserver 8.8.4.4"
+            lxc(f"lxc-attach -n {name} -- sh -c 'echo -e \"{dns_config}\" > /etc/resolv.conf'")
+        except Exception as e:
+            print(f"Warning: Failed to configure DNS: {e}", file=sys.stderr)
+
     # Generate and run setup script
     setup_script = generate_setup_script(name, os_name, init_scripts, password)
 
@@ -495,8 +513,12 @@ def cmd_create(args):
     bridge = None
     if not args.no_start and sys.stdin.isatty():
         bridge = select_network_bridge()
-        if bridge != "lxcbr0":
+        if bridge and bridge != "br0":
             print(f"Using bridge: {bridge}")
+
+    # Use br0 as default if no bridge selected
+    if not bridge:
+        bridge = "br0"
 
     # Resolve init scripts
     init_scripts = []
