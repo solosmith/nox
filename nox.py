@@ -140,14 +140,8 @@ def save_meta(name, meta):
     with open(meta_path(name), "w") as f:
         json.dump(meta, f, indent=2)
 
-def vm_ip(name, timeout=60, wait_for_boot=False):
+def vm_ip(name, timeout=60):
     """Get VM IP address."""
-    # Optional wait for VM to boot (only used during creation)
-    if wait_for_boot:
-        print("Waiting for VM to boot (60 seconds)...")
-        time.sleep(60)
-
-    # Set deadline after initial wait
     deadline = time.time() + timeout
 
     # Get VM MAC address
@@ -166,40 +160,25 @@ def vm_ip(name, timeout=60, wait_for_boot=False):
     if not mac_address:
         return None
 
-    # Try virsh domifaddr first (works for some network types)
     while time.time() < deadline:
-        result = virsh(f"domifaddr {name}", check=False)
+        # Use nmap to scan and match MAC address directly from its output
+        result = run(f"nmap -sn 10.0.0.0/24", check=False, capture=True)
         if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if "ipv4" in line.lower():
-                    parts = line.split()
-                    for part in parts:
-                        if "/" in part:  # IP with CIDR
-                            return part.split("/")[0]
+            lines = result.stdout.splitlines()
+            for i, line in enumerate(lines):
+                if mac_address.upper() in line.upper():
+                    # IP is on the line before the MAC line
+                    for prev in range(i - 1, -1, -1):
+                        if "Nmap scan report for" in lines[prev]:
+                            # Extract IP from "Nmap scan report for hostname (IP)" or "Nmap scan report for IP"
+                            report = lines[prev]
+                            if "(" in report:
+                                return report.split("(")[1].rstrip(")")
+                            else:
+                                return report.split()[-1]
+                            break
 
-        # Fallback: scan network range to populate ARP table, then check for MAC address
-        # Use nmap if available for faster scanning, otherwise ping sweep
-        scan_cmd = """
-        if command -v nmap >/dev/null 2>&1; then
-            nmap -sn 10.0.0.0/24 >/dev/null 2>&1
-        else
-            for i in $(seq 1 254); do
-                ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 &
-            done
-            wait
-        fi
-        """
-        run(scan_cmd, check=False, capture=False)
-
-        result = run("ip neigh show", check=False, capture=True)
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                if mac_address.lower() in line.lower():
-                    parts = line.split()
-                    if len(parts) >= 1:
-                        return parts[0]
-
-        time.sleep(10)
+        time.sleep(5)
 
     return None
 
@@ -407,10 +386,7 @@ def cmd_create(args):
         time.sleep(90)
 
         print("Scanning network for VM IP address...")
-        run("nmap -sn 10.0.0.0/24 >/dev/null 2>&1 || (for i in $(seq 1 254); do ping -c 1 -W 1 10.0.0.$i >/dev/null 2>&1 & done; wait)", check=False, capture=False)
-        time.sleep(2)
-
-        ip = vm_ip(args.name, timeout=10, wait_for_boot=False)
+        ip = vm_ip(args.name, timeout=30)
 
         print(f"\n{'='*60}")
         print(f"VM '{args.name}' is ready!")
