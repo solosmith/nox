@@ -318,14 +318,28 @@ def get_available_bridges():
                         'eth' in current_interface.lower() or
                         'virbr' in current_interface.lower()
                     ):
+                        # Assign priority: physical interfaces first
+                        priority = 0
+                        if current_interface.startswith('br0') or current_interface.startswith('eth'):
+                            priority = 1  # Highest priority for br0 and eth*
+                        elif current_interface.startswith('br-') or current_interface.startswith('docker'):
+                            priority = 2  # Docker bridges
+                        elif current_interface.startswith('lxcbr'):
+                            priority = 3  # LXC bridges
+                        else:
+                            priority = 4  # Others (virbr, etc.)
+
                         bridges.append({
                             'bridge': current_interface,
                             'ip': ip,
-                            'subnet': subnet
+                            'subnet': subnet,
+                            'priority': priority
                         })
     except:
         pass
 
+    # Sort by priority (lower number = higher priority)
+    bridges.sort(key=lambda x: x['priority'])
     return bridges
 
 
@@ -440,8 +454,7 @@ def create_container(name, os_name=None, cpus=None, ram=None, disk=None,
         # Configure DNS in container
         # Use Google DNS instead of host DNS (which might be Tailscale or other VPN DNS)
         try:
-            dns_config = "nameserver 8.8.8.8\\nnameserver 8.8.4.4"
-            lxc(f"lxc-attach -n {name} -- sh -c 'echo -e \"{dns_config}\" > /etc/resolv.conf'")
+            lxc(f"lxc-attach -n {name} -- sh -c 'printf \"nameserver 8.8.8.8\\nnameserver 8.8.4.4\\n\" > /etc/resolv.conf'")
         except Exception as e:
             print(f"Warning: Failed to configure DNS: {e}", file=sys.stderr)
 
