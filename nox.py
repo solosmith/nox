@@ -37,6 +37,14 @@ CONFIG_FILE = os.path.join(NOX_DIR, "config.json")
 DEFAULT_CONFIG = {
     "defaults": {"os": "debian", "cpus": 1, "ram": 512, "disk": 5},
     "env": {},
+    "s3": {
+        "enabled": False,
+        "endpoint": "",
+        "bucket": "",
+        "access_key": "",
+        "secret_key": "",
+        "region": "us-east-1"
+    }
 }
 
 # OS image URLs (cloud images with cloud-init support)
@@ -165,6 +173,211 @@ def generate_password():
     """Generate random password."""
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(12))
+
+# ---------------------------------------------------------------------------
+# S3 Helper Functions
+# ---------------------------------------------------------------------------
+
+def upload_to_s3(backup_path, backup_name, s3_config):
+    """Upload backup to S3-compatible storage."""
+    try:
+        print(f"\nUploading backup to S3...")
+        
+        endpoint = s3_config.get("endpoint")
+        bucket = s3_config.get("bucket")
+        access_key = s3_config.get("access_key")
+        secret_key = s3_config.get("secret_key")
+        region = s3_config.get("region", "us-east-1")
+        
+        # Create tarball of backup
+        import tarfile
+        tarball_path = f"{backup_path}.tar.gz"
+        with tarfile.open(tarball_path, "w:gz") as tar:
+            tar.add(backup_path, arcname=backup_name)
+        
+        # Upload using AWS CLI or boto3
+        s3_path = f"s3://{bucket}/nox-backups/{backup_name}.tar.gz"
+        
+        # Try using aws cli first
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = access_key
+        env["AWS_SECRET_ACCESS_KEY"] = secret_key
+        env["AWS_DEFAULT_REGION"] = region
+        
+        if endpoint:
+            env["AWS_ENDPOINT_URL"] = endpoint
+            cmd = f"aws s3 cp {tarball_path} {s3_path} --endpoint-url {endpoint}"
+        else:
+            cmd = f"aws s3 cp {tarball_path} {s3_path}"
+        
+        result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
+        
+        # Clean up tarball
+        os.remove(tarball_path)
+        
+        if result.returncode == 0:
+            print(f"✓ Backup uploaded to S3: {s3_path}")
+        else:
+            print(f"Warning: Failed to upload to S3: {result.stderr}", file=sys.stderr)
+            
+    except Exception as e:
+        print(f"Warning: S3 upload failed: {e}", file=sys.stderr)
+
+def list_s3_backups(s3_config):
+    """List backups from S3."""
+    try:
+        endpoint = s3_config.get("endpoint")
+        bucket = s3_config.get("bucket")
+        access_key = s3_config.get("access_key")
+        secret_key = s3_config.get("secret_key")
+        region = s3_config.get("region", "us-east-1")
+        
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = access_key
+        env["AWS_SECRET_ACCESS_KEY"] = secret_key
+        env["AWS_DEFAULT_REGION"] = region
+        
+        s3_path = f"s3://{bucket}/nox-backups/"
+        
+        if endpoint:
+            env["AWS_ENDPOINT_URL"] = endpoint
+            cmd = f"aws s3 ls {s3_path} --endpoint-url {endpoint}"
+        else:
+            cmd = f"aws s3 ls {s3_path}"
+        
+        result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            backups = []
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 4 and parts[-1].endswith('.tar.gz'):
+                    backup_name = parts[-1].replace('.tar.gz', '')
+                    date_str = f"{parts[0]} {parts[1]}"
+                    size = parts[2]
+                    backups.append({
+                        'name': backup_name,
+                        'date': date_str,
+                        'size': size,
+                        'source': 's3'
+                    })
+            return backups
+        else:
+            return []
+            
+    except Exception as e:
+        print(f"Warning: Failed to list S3 backups: {e}", file=sys.stderr)
+        return []
+
+def download_from_s3(backup_name, s3_config):
+    """Download backup from S3."""
+    try:
+        print(f"Downloading backup from S3...")
+        
+        endpoint = s3_config.get("endpoint")
+        bucket = s3_config.get("bucket")
+        access_key = s3_config.get("access_key")
+        secret_key = s3_config.get("secret_key")
+        region = s3_config.get("region", "us-east-1")
+        
+        env = os.environ.copy()
+        env["AWS_ACCESS_KEY_ID"] = access_key
+        env["AWS_SECRET_ACCESS_KEY"] = secret_key
+        env["AWS_DEFAULT_REGION"] = region
+        
+        s3_path = f"s3://{bucket}/nox-backups/{backup_name}.tar.gz"
+        tarball_path = os.path.join(BACKUPS_DIR, f"{backup_name}.tar.gz")
+        
+        if endpoint:
+            env["AWS_ENDPOINT_URL"] = endpoint
+            cmd = f"aws s3 cp {s3_path} {tarball_path} --endpoint-url {endpoint}"
+        else:
+            cmd = f"aws s3 cp {s3_path} {tarball_path}"
+        
+        result = subprocess.run(cmd, shell=True, env=env, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            # Extract tarball
+            import tarfile
+            with tarfile.open(tarball_path, "r:gz") as tar:
+                tar.extractall(BACKUPS_DIR)
+            
+            # Clean up tarball
+            os.remove(tarball_path)
+            
+            print(f"✓ Backup downloaded from S3")
+            return True
+        else:
+            print(f"Error: Failed to download from S3: {result.stderr}", file=sys.stderr)
+            return False
+            
+    except Exception as e:
+        print(f"Error: S3 download failed: {e}", file=sys.stderr)
+        return False
+
+def interactive_backup_selection(backups):
+    """Interactive backup selection using arrow keys."""
+    if not backups:
+        print("No backups available.")
+        return None
+    
+    try:
+        import curses
+        
+        def select_backup(stdscr):
+            curses.curs_set(0)
+            current_idx = 0
+            
+            while True:
+                stdscr.clear()
+                h, w = stdscr.getmaxyx()
+                
+                stdscr.addstr(0, 0, "Select a backup to restore (↑/↓ to navigate, Enter to select, q to quit):", curses.A_BOLD)
+                stdscr.addstr(1, 0, "-" * min(w-1, 80))
+                
+                for idx, backup in enumerate(backups):
+                    y = idx + 3
+                    if y >= h - 1:
+                        break
+                    
+                    source_tag = "[S3]" if backup.get('source') == 's3' else "[Local]"
+                    line = f"{source_tag} {backup['name']} - {backup.get('date', 'N/A')}"
+                    
+                    if idx == current_idx:
+                        stdscr.addstr(y, 0, f"> {line}", curses.A_REVERSE)
+                    else:
+                        stdscr.addstr(y, 0, f"  {line}")
+                
+                stdscr.refresh()
+                
+                key = stdscr.getch()
+                
+                if key == curses.KEY_UP and current_idx > 0:
+                    current_idx -= 1
+                elif key == curses.KEY_DOWN and current_idx < len(backups) - 1:
+                    current_idx += 1
+                elif key == ord('\n'):
+                    return backups[current_idx]
+                elif key == ord('q') or key == ord('Q'):
+                    return None
+        
+        return curses.wrapper(select_backup)
+        
+    except ImportError:
+        # Fallback to simple numbered selection if curses not available
+        print("\nAvailable backups:")
+        for idx, backup in enumerate(backups):
+            source_tag = "[S3]" if backup.get('source') == 's3' else "[Local]"
+            print(f"{idx + 1}. {source_tag} {backup['name']} - {backup.get('date', 'N/A')}")
+        
+        try:
+            choice = int(input("\nEnter backup number (0 to cancel): "))
+            if choice > 0 and choice <= len(backups):
+                return backups[choice - 1]
+        except (ValueError, KeyboardInterrupt):
+            pass
+        
+        return None
 
 # ---------------------------------------------------------------------------
 # Cloud-init generation
@@ -706,6 +919,12 @@ def cmd_backup(args):
         if was_running:
             print(f"  VM '{args.name}' remained running during backup")
 
+        # Upload to S3 if configured
+        cfg = load_config()
+        s3_config = cfg.get("s3", {})
+        if s3_config.get("enabled"):
+            upload_to_s3(backup_path, backup_name, s3_config)
+
     except Exception as e:
         print(f"Error creating backup: {e}", file=sys.stderr)
         # Try to clean up snapshot if it exists
@@ -720,11 +939,64 @@ def cmd_backup(args):
         sys.exit(1)
 
 def cmd_restore(args):
-    """Restore a VM from backup."""
-    backup_path = os.path.join(BACKUPS_DIR, args.backup_name)
+    """Restore a VM from backup with interactive selection."""
+    cfg = load_config()
+    s3_config = cfg.get("s3", {})
+    
+    # If no backup name provided, show interactive selection
+    if not args.backup_name:
+        # Collect local backups
+        local_backups = []
+        if os.path.exists(BACKUPS_DIR):
+            for backup_name in os.listdir(BACKUPS_DIR):
+                backup_path = os.path.join(BACKUPS_DIR, backup_name)
+                if not os.path.isdir(backup_path):
+                    continue
+                
+                info_path = os.path.join(backup_path, "backup_info.json")
+                if os.path.exists(info_path):
+                    with open(info_path) as f:
+                        info = json.load(f)
+                    local_backups.append({
+                        'name': backup_name,
+                        'date': info.get('timestamp', 'N/A'),
+                        'source': 'local'
+                    })
+        
+        # Collect S3 backups if enabled
+        s3_backups = []
+        if s3_config.get("enabled"):
+            s3_backups = list_s3_backups(s3_config)
+        
+        # Combine all backups
+        all_backups = local_backups + s3_backups
+        
+        if not all_backups:
+            print("No backups available.")
+            sys.exit(1)
+        
+        # Interactive selection
+        selected = interactive_backup_selection(all_backups)
+        
+        if not selected:
+            print("Restore cancelled.")
+            sys.exit(0)
+        
+        backup_name = selected['name']
+        
+        # Download from S3 if needed
+        if selected.get('source') == 's3':
+            backup_path = os.path.join(BACKUPS_DIR, backup_name)
+            if not os.path.exists(backup_path):
+                if not download_from_s3(backup_name, s3_config):
+                    sys.exit(1)
+    else:
+        backup_name = args.backup_name
+    
+    backup_path = os.path.join(BACKUPS_DIR, backup_name)
     
     if not os.path.exists(backup_path):
-        print(f"Backup '{args.backup_name}' does not exist.", file=sys.stderr)
+        print(f"Backup '{backup_name}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
     # Load backup info
@@ -751,7 +1023,7 @@ def cmd_restore(args):
             virsh(f"destroy {restore_name}")
         virsh(f"undefine {restore_name} --nvram --remove-all-storage", check=False)
 
-    print(f"Restoring VM '{restore_name}' from backup '{args.backup_name}'...")
+    print(f"Restoring VM '{restore_name}' from backup '{backup_name}'...")
 
     # Create VM directory
     vm_path = vm_dir(restore_name)
@@ -814,57 +1086,86 @@ def cmd_restore(args):
         sys.exit(1)
 
 def cmd_list_backups(args):
-    """List all backups."""
-    if not os.path.exists(BACKUPS_DIR):
+    """List all backups from local and S3."""
+    cfg = load_config()
+    s3_config = cfg.get("s3", {})
+    
+    # Collect local backups
+    local_backups = []
+    if os.path.exists(BACKUPS_DIR):
+        for backup_name in os.listdir(BACKUPS_DIR):
+            backup_path = os.path.join(BACKUPS_DIR, backup_name)
+            if not os.path.isdir(backup_path):
+                continue
+
+            info_path = os.path.join(backup_path, "backup_info.json")
+            if os.path.exists(info_path):
+                with open(info_path) as f:
+                    info = json.load(f)
+                
+                # Calculate backup size
+                total_size = 0
+                for root, dirs, files in os.walk(backup_path):
+                    for f in files:
+                        fp = os.path.join(root, f)
+                        if os.path.exists(fp):
+                            total_size += os.path.getsize(fp)
+                
+                size_gb = total_size / (1024 ** 3)
+                
+                local_backups.append({
+                    'name': backup_name,
+                    'vm_name': info.get("vm_name", "?"),
+                    'timestamp': info.get("timestamp", "?"),
+                    'size': f"{size_gb:.2f}GB",
+                    'source': 'Local'
+                })
+    
+    # Collect S3 backups if enabled
+    s3_backups = []
+    if s3_config.get("enabled"):
+        print("Fetching S3 backups...")
+        s3_list = list_s3_backups(s3_config)
+        for backup in s3_list:
+            # Parse VM name from backup name (format: vmname_timestamp)
+            parts = backup['name'].rsplit('_', 2)
+            vm_name = parts[0] if len(parts) >= 3 else "?"
+            
+            s3_backups.append({
+                'name': backup['name'],
+                'vm_name': vm_name,
+                'timestamp': backup.get('date', '?'),
+                'size': backup.get('size', '?'),
+                'source': 'S3'
+            })
+    
+    all_backups = local_backups + s3_backups
+    
+    if not all_backups:
         print("No backups found.")
         return
 
-    backups = []
-    for backup_name in os.listdir(BACKUPS_DIR):
-        backup_path = os.path.join(BACKUPS_DIR, backup_name)
-        if not os.path.isdir(backup_path):
-            continue
+    print(f"{'SOURCE':<8} {'BACKUP NAME':<40} {'VM NAME':<20} {'DATE':<20} {'SIZE'}")
+    print("-" * 105)
 
-        info_path = os.path.join(backup_path, "backup_info.json")
-        if os.path.exists(info_path):
-            with open(info_path) as f:
-                info = json.load(f)
-            backups.append((backup_name, info))
-
-    if not backups:
-        print("No backups found.")
-        return
-
-    print(f"{'BACKUP NAME':<40} {'VM NAME':<20} {'DATE':<20} {'SIZE'}")
-    print("-" * 95)
-
-    for backup_name, info in sorted(backups, key=lambda x: x[1].get("timestamp", ""), reverse=True):
-        vm_name = info.get("vm_name", "?")
-        timestamp = info.get("timestamp", "?")
+    for backup in sorted(all_backups, key=lambda x: x.get("timestamp", ""), reverse=True):
+        source = backup['source']
+        name = backup['name']
+        vm_name = backup['vm_name']
+        timestamp = backup['timestamp']
+        size = backup['size']
         
-        # Format timestamp
-        if timestamp != "?":
+        # Format timestamp if needed
+        if timestamp != "?" and len(timestamp) == 15:  # Format: YYYYMMDD_HHMMSS
             try:
                 dt = time.strptime(timestamp, "%Y%m%d_%H%M%S")
                 date_str = time.strftime("%Y-%m-%d %H:%M:%S", dt)
             except:
                 date_str = timestamp
         else:
-            date_str = "?"
+            date_str = timestamp
 
-        # Calculate backup size
-        backup_path = os.path.join(BACKUPS_DIR, backup_name)
-        total_size = 0
-        for root, dirs, files in os.walk(backup_path):
-            for f in files:
-                fp = os.path.join(root, f)
-                if os.path.exists(fp):
-                    total_size += os.path.getsize(fp)
-        
-        size_gb = total_size / (1024 ** 3)
-        size_str = f"{size_gb:.2f}GB"
-
-        print(f"{backup_name:<40} {vm_name:<20} {date_str:<20} {size_str}")
+        print(f"{source:<8} {name:<40} {vm_name:<20} {date_str:<20} {size}")
 
 def cmd_update(args):
     """Update nox to the latest version from GitHub."""
@@ -971,8 +1272,8 @@ def main():
     p.add_argument("name")
 
     # restore
-    p = sub.add_parser("restore", help="Restore a VM from backup")
-    p.add_argument("backup_name", help="Name of the backup to restore")
+    p = sub.add_parser("restore", help="Restore a VM from backup (interactive if no backup specified)")
+    p.add_argument("backup_name", nargs="?", default=None, help="Name of the backup to restore (optional - will show interactive selection)")
     p.add_argument("--name", default=None, help="New name for restored VM (default: original name)")
     p.add_argument("--force", action="store_true", help="Overwrite existing VM")
     p.add_argument("--no-start", action="store_true", help="Don't start VM after restore")
