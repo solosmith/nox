@@ -625,7 +625,7 @@ def cmd_resize(args):
 
 
 def cmd_backup(args):
-    """Backup a VM."""
+    """Backup a VM using live snapshot (no downtime)."""
     if not vm_exists(args.name):
         print(f"VM '{args.name}' does not exist.", file=sys.stderr)
         sys.exit(1)
@@ -633,36 +633,40 @@ def cmd_backup(args):
     state = vm_state(args.name)
     was_running = state == "running"
     
-    # Stop VM if running for consistent backup
-    if was_running:
-        print(f"Stopping VM '{args.name}' for backup...")
-        virsh(f"shutdown {args.name}")
-        # Wait for shutdown
-        for _ in range(30):
-            if vm_state(args.name) == "shut off":
-                break
-            time.sleep(1)
-        else:
-            print("Warning: VM did not shut down gracefully, forcing shutdown...")
-            virsh(f"destroy {args.name}")
-            time.sleep(2)
-
     # Create backup directory
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     backup_name = f"{args.name}_{timestamp}"
     backup_path = os.path.join(BACKUPS_DIR, backup_name)
     os.makedirs(backup_path, exist_ok=True)
 
-    print(f"Creating backup '{backup_name}'...")
+    print(f"Creating live backup '{backup_name}'...")
 
     vm_path = vm_dir(args.name)
     disk_path = os.path.join(vm_path, f"{args.name}.qcow2")
+    snapshot_disk = os.path.join(vm_path, f"{args.name}_snapshot.qcow2")
 
     try:
+        # Create external snapshot if VM is running (live backup)
+        if was_running:
+            print("Creating live snapshot (VM continues running)...")
+            # Create external snapshot - VM writes to new file, original becomes read-only
+            virsh(f"snapshot-create-as {args.name} backup_snapshot --disk-only --atomic --no-metadata")
+            # Now the original disk is frozen and can be safely backed up
+            time.sleep(1)  # Brief pause to ensure snapshot is ready
+
         # Backup disk image with compression
         print("Backing up disk image (compressed)...")
         backup_disk = os.path.join(backup_path, f"{args.name}.qcow2")
         run(f"qemu-img convert -O qcow2 -c {disk_path} {backup_disk}")
+
+        # If we created a snapshot, merge it back
+        if was_running:
+            print("Merging snapshot back...")
+            # Commit changes from snapshot back to original
+            virsh(f"blockcommit {args.name} vda --active --pivot")
+            # Clean up snapshot file
+            if os.path.exists(snapshot_disk):
+                os.remove(snapshot_disk)
 
         # Backup metadata
         meta = load_meta(args.name)
@@ -699,16 +703,21 @@ def cmd_backup(args):
 
         print(f"✓ Backup created successfully: {backup_name}")
         print(f"  Location: {backup_path}")
+        if was_running:
+            print(f"  VM '{args.name}' remained running during backup")
 
     except Exception as e:
         print(f"Error creating backup: {e}", file=sys.stderr)
+        # Try to clean up snapshot if it exists
+        if was_running:
+            try:
+                virsh(f"blockcommit {args.name} vda --active --pivot", check=False)
+                if os.path.exists(snapshot_disk):
+                    os.remove(snapshot_disk)
+            except:
+                pass
         shutil.rmtree(backup_path, ignore_errors=True)
         sys.exit(1)
-    finally:
-        # Restart VM if it was running
-        if was_running:
-            print(f"Restarting VM '{args.name}'...")
-            virsh(f"start {args.name}")
 
 def cmd_restore(args):
     """Restore a VM from backup."""
