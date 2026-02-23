@@ -147,7 +147,8 @@ def vm_ip(name, timeout=60):
     while time.time() < deadline:
         result = virsh(f"domifaddr {name} --source agent", check=False)
         if result.returncode == 0:
-            for line in result.stdout.splitlines():
+            stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode('utf-8')
+            for line in stdout.splitlines():
                 if "ipv4" in line.lower() and "127.0.0.1" not in line:
                     parts = line.split()
                     for part in parts:
@@ -486,6 +487,43 @@ def cmd_status(args):
     result = virsh(f"dominfo {args.name}")
     print(result.stdout)
 
+def cmd_passwd(args):
+    """Change SSH password for a VM."""
+    if not vm_exists(args.name):
+        print(f"VM '{args.name}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    state = vm_state(args.name)
+    if state != "running":
+        print(f"VM '{args.name}' is not running. Start it with: nox start {args.name}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Generating new password for VM '{args.name}'...")
+    ip = vm_ip(args.name, timeout=10)
+    if not ip:
+        print(f"Could not get IP for VM '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+
+    # Generate new password
+    new_password = generate_password()
+
+    # Change password via SSH
+    ssh_cmd = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nox@{ip} \"echo 'nox:{new_password}' | sudo chpasswd\""
+    
+    try:
+        run(ssh_cmd)
+        print(f"\n{'='*60}")
+        print(f"Password changed successfully for VM '{args.name}'!")
+        print(f"{'='*60}")
+        print(f"\nNew SSH Password (shown once):")
+        print(f"  Password: {new_password}")
+        print(f"  Command: ssh nox@{ip}")
+        print(f"\nIMPORTANT: Save this password - it won't be shown again!")
+        print(f"{'='*60}")
+    except RuntimeError as e:
+        print(f"Failed to change password: {e}", file=sys.stderr)
+        sys.exit(1)
+
 def cmd_update(args):
     """Update nox to the latest version from GitHub."""
     import tempfile
@@ -560,7 +598,7 @@ def main():
     p.add_argument("name")
 
     # delete
-    p = sub.add_parser("delete", help="Delete VM")
+    p = sub.add_parser("delete", aliases=["rm"], help="Delete VM")
     p.add_argument("name")
 
     # list
@@ -574,6 +612,10 @@ def main():
     p = sub.add_parser("ssh", help="SSH into VM")
     p.add_argument("name")
     p.add_argument("ssh_command", nargs="*", default=None)
+
+    # passwd
+    p = sub.add_parser("passwd", help="Change SSH password for VM")
+    p.add_argument("name")
 
     # update
     sub.add_parser("update", aliases=["up"], help="Update nox")
@@ -595,6 +637,7 @@ def main():
         "ls": cmd_list,
         "status": cmd_status,
         "ssh": cmd_ssh,
+        "passwd": cmd_passwd,
         "update": cmd_update,
         "up": cmd_update,
     }
