@@ -753,7 +753,7 @@ def cmd_restore(args):
         print("Restoring disk image...")
         backup_disk = os.path.join(backup_path, f"{original_name}.qcow2")
         restore_disk = os.path.join(vm_path, f"{restore_name}.qcow2")
-        run(f"cp {backup_disk} {restore_disk}")
+        run(f"qemu-img convert -O qcow2 {backup_disk} {restore_disk}")
 
         # Restore metadata
         backup_meta = os.path.join(backup_path, "meta.json")
