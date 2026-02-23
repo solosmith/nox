@@ -1,29 +1,31 @@
-# nox - LXC Container Manager
+# nox - Lightweight VM Manager
 
-A simple, Lima-like container manager for Linux using LXC. Create isolated containers with SSH access, resource limits, and launch scripts.
+A simple VM manager for Linux using libvirt/KVM. Create VMs with SSH access, resource management, and automated backups with S3 integration.
 
 Current version: 1.0.0
 
 ## Features
 
-- **Simple CLI** - Easy-to-use commands for container management
-- **LXC-based** - Uses native LXC containers (no Docker required)
-- **Dual networking modes** - Bridged networking on physical hardware, isolated on VMs
+- **Simple CLI** - Easy-to-use commands for VM management
+- **KVM/libvirt-based** - Uses native virtualization
+- **Live backups** - Zero-downtime backups with compression
+- **S3 integration** - Auto-upload backups to S3-compatible storage
+- **Interactive restore** - Arrow key selection for backup restoration
 - **SSH access** - Password + SSH key authentication
-- **Resource limits** - CPU and memory limits via cgroups
-- **Launch scripts** - Pre-built scripts for docker, tailscale, claude
-- **Multi-OS support** - Debian and Alpine images
-- **Autostart** - Containers autostart on boot by default
-- **Docker support** - Run Docker inside containers
+- **Resource management** - Resize CPU, RAM, and disk on-the-fly
+- **Password rotation** - Secure password generation and updates
+- **Cloud-init** - Automated VM provisioning
+- **Debian support** - Pre-configured Debian cloud images
 
 ## Requirements
 
-- Linux system (Debian, Ubuntu, or Alpine)
-- LXC installed
+- Linux system (Debian, Ubuntu, or similar)
+- KVM/QEMU and libvirt installed
 - Python 3
 - Root/sudo access
+- Optional: AWS CLI for S3 integration
 
-**Note:** macOS is not supported. LXC requires Linux kernel features. For testing on macOS, deploy inside a Lima VM.
+**Note:** macOS is not supported. KVM requires Linux kernel features.
 
 ## Quick Installation
 
@@ -38,7 +40,8 @@ Or manual installation:
 ```bash
 git clone https://github.com/solosmith/nox.git
 cd nox
-sudo ./install.sh
+sudo cp nox.py /usr/local/bin/nox
+sudo chmod +x /usr/local/bin/nox
 ```
 
 ## Updating
@@ -49,8 +52,6 @@ To update nox to the latest version:
 nox update
 ```
 
-The update command checks the current version against GitHub and only updates if a newer version is available. Version numbers are automatically bumped on each push to the main branch.
-
 To check your current version:
 
 ```bash
@@ -60,321 +61,387 @@ nox --version
 ## Quick Start
 
 ```bash
-# Create a container
-nox create mycontainer --os debian
+# Create a VM
+nox create myvm --cpus 2 --ram 1024 --disk 10
 
 # SSH into it (passwordless)
-nox ssh mycontainer
+nox ssh myvm
 
-# List containers
+# List VMs
 nox list
 
-# Delete container
-nox delete mycontainer
+# Backup VM
+nox backup myvm
+
+# Delete VM
+nox delete myvm
 ```
 
-### Create a container
+## VM Management
+
+### Create a VM
 
 ```bash
-# Basic container (autostart enabled by default)
-nox create mycontainer
+# Basic VM (autostart enabled by default)
+nox create myvm
 
-# With specific OS and resources
-nox create mycontainer --os debian --cpus 2 --ram 1024
+# With specific resources
+nox create myvm --os debian --cpus 2 --ram 1024 --disk 10
 
-# With launch scripts
-nox create mycontainer --script docker
-nox create mycontainer --script docker,tailscale,claude
+# Create without starting
+nox create myvm --no-start
 
 # Disable autostart
-nox create mycontainer --no-autostart
+nox create myvm --no-autostart
 ```
 
-### SSH into container
+### SSH into VM
 
 ```bash
 # Passwordless SSH (uses your SSH key)
-nox ssh mycontainer
+nox ssh myvm
 
 # Run a command
-nox ssh mycontainer -- uname -a
+nox ssh myvm -- uname -a
 ```
 
-### Manage containers
+### Manage VMs
 
 ```bash
-# List all containers
+# List all VMs
 nox list
 
-# Show container details
-nox status mycontainer
+# Show VM details
+nox status myvm
 
 # Start/stop/restart
-nox start mycontainer
-nox stop mycontainer
-nox restart mycontainer
+nox start myvm
+nox stop myvm
+nox restart myvm
 
-# Delete container
-nox delete mycontainer
+# Delete VM
+nox delete myvm
+# or
+nox rm myvm
 ```
 
-### Configuration
+### Change SSH Password
 
 ```bash
-# View config
-nox config get
-
-# Set defaults
-nox config set defaults.os debian
-nox config set defaults.cpus 2
-nox config set defaults.ram 512
-
-# Set environment variables (applied to all containers)
-nox config set env.MY_VAR value
+# Generate and set new password
+nox passwd myvm
 ```
 
-## Resource Limits
+The new password is displayed once - save it immediately!
 
-### Fractional resources
+## Resource Management
+
+### Resize VM Resources
+
+```bash
+# Resize CPU
+nox resize myvm --cpus 4
+
+# Resize RAM
+nox resize myvm --ram 2048
+
+# Expand disk (cannot shrink)
+nox resize myvm --disk 20
+
+# Resize multiple resources
+nox resize myvm --cpus 4 --ram 2048 --disk 20
+```
+
+**Note:** CPU and RAM changes require VM restart. Disk expansion works while VM is running.
+
+### Fractional Resources
 
 Use values <= 1.0 to specify fraction of host resources:
 
 ```bash
 # 50% of host CPUs
-nox create mycontainer --cpus 0.5
+nox create myvm --cpus 0.5
 
 # 25% of host RAM
-nox create mycontainer --ram 0.25
+nox create myvm --ram 0.25
 ```
 
-### Absolute resources
+### Absolute Resources
 
 Use values > 1.0 to specify absolute amounts:
 
 ```bash
 # 4 CPUs
-nox create mycontainer --cpus 4
+nox create myvm --cpus 4
 
 # 2048 MB RAM
-nox create mycontainer --ram 2048
+nox create myvm --ram 2048
+
+# 20 GB disk
+nox create myvm --disk 20
 ```
 
-## Launch Scripts
+## Backup & Restore
 
-Pre-built scripts in `scripts/`:
-
-- **docker.sh** - Installs Docker inside container
-- **tailscale.sh** - Installs Tailscale client
-- **claude.sh** - Installs Claude Code CLI
-
-### Using launch scripts
+### Create Backup
 
 ```bash
-# Single script
-nox create mycontainer --script docker
-
-# Multiple scripts (comma-separated)
-nox create mycontainer --script docker,tailscale
-
-# Custom script (full path)
-nox create mycontainer --script /path/to/script.sh
+# Backup VM (live backup - no downtime)
+nox backup myvm
 ```
 
-## Network
+Backups are:
+- **Compressed** - Only used disk space is backed up
+- **Live** - VM continues running during backup (uses snapshots)
+- **Complete** - Includes disk, metadata, cloud-init, and VM config
+- **S3-ready** - Auto-uploaded if S3 is configured
 
-### Physical Hardware (Bridged Networking)
-On physical machines, containers get local network IPs from your router:
-- Accessible from any device on your LAN
-- Can SSH directly: `ssh nox@<container-ip>`
-- Full network connectivity like a separate device
-
-### Virtual Machines (Isolated Networking)
-In VMs (Lima, etc.), containers use isolated network (10.0.3.x):
-- Internet access via NAT
-- Isolated from host LAN
-- SSH from host only
-
-The system automatically detects the environment and configures networking appropriately.
-
-## Examples
-
-### Development container with Docker
+### List Backups
 
 ```bash
-nox create dev --os debian --cpus 2 --ram 2048 --script docker
-nox ssh dev
-
-# Inside container, Docker is ready to use
-docker run hello-world
+# List all backups (local + S3)
+nox backups
 ```
 
-### Lightweight Alpine container
+### Restore from Backup
 
 ```bash
-nox create alpine-test --os alpine --cpus 0.5 --ram 256
-nox ssh alpine-test
+# Interactive restore (arrow keys to select)
+nox restore
+
+# Direct restore
+nox restore myvm_20260224_120000
+
+# Restore with new name
+nox restore myvm_20260224_120000 --name newvm
+
+# Force overwrite existing VM
+nox restore myvm_20260224_120000 --force
+
+# Restore without starting
+nox restore myvm_20260224_120000 --no-start
 ```
 
-### Container without autostart
+## S3 Integration
 
-```bash
-nox create temp --no-autostart
+### Configure S3
+
+Edit `~/.nox/config.json`:
+
+```json
+{
+  "defaults": {
+    "os": "debian",
+    "cpus": 1,
+    "ram": 512,
+    "disk": 5
+  },
+  "s3": {
+    "enabled": true,
+    "endpoint": "https://s3.amazonaws.com",
+    "bucket": "my-backups",
+    "access_key": "YOUR_ACCESS_KEY",
+    "secret_key": "YOUR_SECRET_KEY",
+    "region": "us-east-1"
+  }
+}
 ```
 
-### Running Docker inside nox container
+### S3-Compatible Services
 
-```bash
-# Create container with Docker
-nox create docker-host --script docker
+Works with any S3-compatible storage:
 
-# SSH into it
-nox ssh docker-host
-
-# Run Docker containers inside
-docker run -d -p 8080:80 nginx
+**AWS S3:**
+```json
+{
+  "endpoint": "https://s3.amazonaws.com",
+  "region": "us-east-1"
+}
 ```
+
+**MinIO:**
+```json
+{
+  "endpoint": "https://minio.example.com",
+  "region": "us-east-1"
+}
+```
+
+**DigitalOcean Spaces:**
+```json
+{
+  "endpoint": "https://nyc3.digitaloceanspaces.com",
+  "region": "nyc3"
+}
+```
+
+**Backblaze B2:**
+```json
+{
+  "endpoint": "https://s3.us-west-002.backblazeb2.com",
+  "region": "us-west-002"
+}
+```
+
+### How S3 Integration Works
+
+1. **Backup** - After creating a backup, it's automatically uploaded to S3 as a compressed tarball
+2. **List** - `nox backups` shows both local and S3 backups with `[Local]` or `[S3]` tags
+3. **Restore** - When restoring from S3, the backup is downloaded automatically
 
 ## Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `nox create NAME [OPTIONS]` | Create a new container |
-| `nox start NAME` | Start a container |
-| `nox stop NAME` | Stop a container |
-| `nox restart NAME` | Restart a container |
-| `nox delete NAME` | Delete a container |
-| `nox list` | List all containers |
-| `nox status NAME` | Show container details |
-| `nox ssh NAME [COMMAND]` | SSH into container |
-| `nox autostart NAME --enable/--disable` | Manage autostart |
-| `nox config get/set KEY [VALUE]` | Manage configuration |
-| `nox images` | List available images |
+| `nox create NAME [OPTIONS]` | Create a new VM |
+| `nox start NAME` | Start a VM |
+| `nox stop NAME` | Stop a VM |
+| `nox restart NAME` | Restart a VM |
+| `nox delete NAME` | Delete a VM |
+| `nox rm NAME` | Alias for delete |
+| `nox list` | List all VMs |
+| `nox ls` | Alias for list |
+| `nox status NAME` | Show VM details |
+| `nox ssh NAME [COMMAND]` | SSH into VM |
+| `nox passwd NAME` | Change SSH password |
+| `nox resize NAME [OPTIONS]` | Resize VM resources |
+| `nox backup NAME` | Backup a VM |
+| `nox restore [BACKUP]` | Restore VM (interactive if no backup specified) |
+| `nox backups` | List all backups (local + S3) |
 | `nox update` | Update nox to latest version |
 
 ## Options
 
+### Create Options
+
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--os alpine\|debian` | Operating system | debian |
-| `--cpus N` | CPU limit (fractional or absolute) | 1 |
-| `--ram N` | RAM limit in MB (fractional or absolute) | 512 |
-| `--disk N` | Disk size in GB (informational) | 5 |
-| `--script SCRIPTS` | Comma-separated launch scripts | none |
+| `--os debian` | Operating system | debian |
+| `--cpus N` | CPU count (fractional or absolute) | 1 |
+| `--ram N` | RAM in MB (fractional or absolute) | 512 |
+| `--disk N` | Disk size in GB | 5 |
 | `--no-autostart` | Disable autostart on boot | false |
 | `--no-start` | Create but don't start | false |
+
+### Resize Options
+
+| Option | Description |
+|--------|-------------|
+| `--cpus N` | New CPU count |
+| `--ram N` | New RAM in MB |
+| `--disk N` | New disk size in GB (expand only) |
+
+### Restore Options
+
+| Option | Description |
+|--------|-------------|
+| `--name NAME` | New name for restored VM |
+| `--force` | Overwrite existing VM |
+| `--no-start` | Don't start VM after restore |
 
 ## Files
 
 - `nox.py` - Main CLI tool
-- `install.sh` - Dependency installer
-- `scripts/` - Launch scripts directory
-- `~/.nox/containers/` - Container metadata
+- `~/.nox/vms/` - VM storage and metadata
+- `~/.nox/images/` - Cached OS images
+- `~/.nox/backups/` - Local backups
 - `~/.nox/config.json` - User configuration
-- `/var/lib/lxc/` - LXC container storage
+
+## Examples
+
+### Development VM
+
+```bash
+# Create VM with 4 CPUs, 4GB RAM, 20GB disk
+nox create dev --cpus 4 --ram 4096 --disk 20
+
+# SSH into it
+nox ssh dev
+
+# Install software inside VM
+sudo apt update && sudo apt install -y docker.io
+```
+
+### Backup Workflow
+
+```bash
+# Create and backup a VM
+nox create prod --cpus 2 --ram 2048 --disk 20
+nox backup prod
+
+# List backups
+nox backups
+
+# Restore to new VM
+nox restore prod_20260224_120000 --name prod-clone
+```
+
+### Resource Scaling
+
+```bash
+# Start small
+nox create app --cpus 1 --ram 512 --disk 10
+
+# Scale up as needed
+nox resize app --cpus 4 --ram 4096 --disk 50
+```
 
 ## Troubleshooting
 
-### Container can't access internet
+### VM won't start
 
-Check LXC bridge:
+Check libvirt status:
 ```bash
-sudo lxc-ls --fancy
-ip addr show lxcbr0
+sudo systemctl status libvirtd
+sudo virsh list --all
 ```
 
-Restart LXC networking:
+### Network issues
+
+Check network:
 ```bash
-sudo systemctl restart lxc-net  # Debian/Ubuntu
-sudo service lxc restart         # Alpine
+sudo virsh net-list --all
+sudo virsh net-start default
+sudo virsh net-autostart default
+```
+
+### Backup fails
+
+Check disk space:
+```bash
+df -h ~/.nox/backups
+```
+
+Check S3 credentials:
+```bash
+aws s3 ls s3://your-bucket --endpoint-url https://your-endpoint
 ```
 
 ### SSH connection refused
 
-Wait a few seconds for SSH to start, then try again:
+Wait for VM to boot:
 ```bash
-sleep 10 && nox ssh mycontainer
+nox list  # Check if VM is running
+sleep 30 && nox ssh myvm
 ```
 
-### Permission denied
+## Performance
 
-Make sure you're in the lxc group:
-```bash
-groups | grep lxc
-```
+### Backup Size Comparison
 
-If not, log out and back in after running `install.sh`.
+| Disk Size | Used Space | Backup Size |
+|-----------|------------|-------------|
+| 5 GB | 500 MB | ~250 MB |
+| 10 GB | 2 GB | ~1 GB |
+| 20 GB | 5 GB | ~2.5 GB |
 
-### Container creation fails
+Backups are compressed and only include used disk space, not allocated space.
 
-Check LXC is properly installed:
-```bash
-sudo lxc-checkconfig
-```
+### Backup Speed
 
-Ensure templates are available:
-```bash
-ls /usr/share/lxc/templates/
-```
-
-### Memory limits not working
-
-Your system may not have the memory cgroup controller enabled. Check:
-```bash
-cat /sys/fs/cgroup/cgroup.controllers
-```
-
-If `memory` is not listed, memory limits will be skipped automatically. CPU limits will still work.
-
-### Containers not accessible from LAN
-
-If you're on physical hardware and containers aren't getting local network IPs:
-```bash
-# Check bridge configuration
-ip link show lxcbr0
-brctl show
-
-# Verify bridge is attached to physical interface
-sudo brctl show lxcbr0
-```
-
-On virtual machines (Lima, etc.), containers use isolated networking by design.
-
-## Testing on macOS
-
-Since LXC requires Linux, test on macOS using Lima:
-
-```bash
-# Install Lima
-brew install lima
-
-# Create a Linux VM
-limactl start --name=nox-test template://debian
-
-# SSH into the VM
-lima nox-test
-
-# Inside the VM, clone and install nox
-git clone <your-repo>
-cd nox
-./install.sh
-sudo cp nox.py /usr/local/bin/nox
-sudo chmod +x /usr/local/bin/nox
-
-# Use nox normally
-nox create test
-nox ssh test
-```
-
-## Differences from Docker version
-
-- Uses LXC instead of Docker
-- Requires sudo for container operations
-- Dual networking: bridged on hardware, isolated in VMs
-- Resource limits via cgroups (both v1 and v2 supported)
-- Container storage in `/var/lib/lxc/`
-- More VM-like experience
-- Autostart enabled by default
-- Can run Docker inside containers
+- **Live backup**: ~30 seconds for 5GB VM
+- **S3 upload**: Depends on bandwidth
+- **Restore**: ~1 minute for 5GB VM
 
 ## License
 
