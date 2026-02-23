@@ -524,6 +524,104 @@ def cmd_passwd(args):
         print(f"Failed to change password: {e}", file=sys.stderr)
         sys.exit(1)
 
+def cmd_resize(args):
+    """Resize VM resources (CPUs, RAM, or disk)."""
+    if not vm_exists(args.name):
+        print(f"VM '{args.name}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    state = vm_state(args.name)
+    meta = load_meta(args.name)
+    if not meta:
+        print(f"Could not load metadata for VM '{args.name}'", file=sys.stderr)
+        sys.exit(1)
+
+    vm_path = vm_dir(args.name)
+    disk_path = os.path.join(vm_path, f"{args.name}.qcow2")
+
+    # Handle CPU resize
+    if args.cpus is not None:
+        vcpus = resolve_resource(args.cpus, host_cpus())
+        print(f"Resizing CPUs to {vcpus}...")
+        
+        # Set maximum vCPUs (requires VM to be shut off)
+        if state == "running":
+            print("Note: Setting maximum vCPUs requires VM shutdown. Stopping VM...")
+            virsh(f"shutdown {args.name}")
+            # Wait for shutdown
+            for _ in range(30):
+                if vm_state(args.name) == "shut off":
+                    break
+                time.sleep(1)
+        
+        virsh(f"setvcpus {args.name} {vcpus} --maximum --config")
+        virsh(f"setvcpus {args.name} {vcpus} --config")
+        meta["vcpus"] = vcpus
+        print(f"✓ CPUs updated to {vcpus}")
+        
+        if state == "running":
+            print("Restarting VM...")
+            virsh(f"start {args.name}")
+
+    # Handle RAM resize
+    if args.ram is not None:
+        ram_mb = resolve_resource(args.ram, host_ram_mb())
+        ram_kb = ram_mb * 1024
+        print(f"Resizing RAM to {ram_mb}MB...")
+        
+        if state == "running":
+            print("Note: RAM resize requires VM shutdown. Stopping VM...")
+            virsh(f"shutdown {args.name}")
+            # Wait for shutdown
+            for _ in range(30):
+                if vm_state(args.name) == "shut off":
+                    break
+                time.sleep(1)
+        
+        virsh(f"setmaxmem {args.name} {ram_kb} --config")
+        virsh(f"setmem {args.name} {ram_kb} --config")
+        meta["ram_mb"] = ram_mb
+        print(f"✓ RAM updated to {ram_mb}MB")
+        
+        if state == "running":
+            print("Restarting VM...")
+            virsh(f"start {args.name}")
+
+    # Handle disk resize
+    if args.disk is not None:
+        disk_gb = resolve_resource(args.disk, host_disk_gb())
+        current_disk = meta.get("disk_gb", 0)
+        
+        if disk_gb <= current_disk:
+            print(f"Error: New disk size ({disk_gb}GB) must be larger than current size ({current_disk}GB)", file=sys.stderr)
+            print("Disk shrinking is not supported.", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"Expanding disk from {current_disk}GB to {disk_gb}GB...")
+        
+        # Resize the qcow2 image
+        run(f"qemu-img resize {disk_path} {disk_gb}G")
+        
+        # If VM is running, use virsh blockresize
+        if state == "running":
+            virsh(f"blockresize {args.name} {disk_path} {disk_gb}G")
+        
+        meta["disk_gb"] = disk_gb
+        print(f"✓ Disk expanded to {disk_gb}GB")
+        print("Note: You may need to resize the filesystem inside the VM:")
+        print("  sudo growpart /dev/vda 1")
+        print("  sudo resize2fs /dev/vda1")
+
+    # Save updated metadata
+    save_meta(args.name, meta)
+    
+    print(f"\n✓ VM '{args.name}' resized successfully!")
+    if state == "running" and (args.cpus is not None or args.ram is not None):
+        print(f"VM state: running")
+    elif state == "shut off":
+        print(f"VM state: shut off (use 'nox start {args.name}' to start)")
+
+
 def cmd_update(args):
     """Update nox to the latest version from GitHub."""
     import tempfile
@@ -617,6 +715,13 @@ def main():
     p = sub.add_parser("passwd", help="Change SSH password for VM")
     p.add_argument("name")
 
+    # resize
+    p = sub.add_parser("resize", help="Resize VM resources")
+    p.add_argument("name")
+    p.add_argument("--cpus", type=float, default=None, help="New CPU count")
+    p.add_argument("--ram", type=float, default=None, help="New RAM in MB")
+    p.add_argument("--disk", type=float, default=None, help="New disk size in GB (can only expand)")
+
     # update
     sub.add_parser("update", aliases=["up"], help="Update nox")
 
@@ -638,6 +743,7 @@ def main():
         "status": cmd_status,
         "ssh": cmd_ssh,
         "passwd": cmd_passwd,
+        "resize": cmd_resize,
         "update": cmd_update,
         "up": cmd_update,
     }
