@@ -31,6 +31,7 @@ VERSION = get_version()
 NOX_DIR = os.path.expanduser("~/.nox")
 VMS_DIR = os.path.join(NOX_DIR, "vms")
 IMAGES_DIR = os.path.join(NOX_DIR, "images")
+BACKUPS_DIR = os.path.join(NOX_DIR, "backups")
 CONFIG_FILE = os.path.join(NOX_DIR, "config.json")
 
 DEFAULT_CONFIG = {
@@ -53,6 +54,7 @@ OS_IMAGES = {
 def ensure_dirs():
     os.makedirs(VMS_DIR, exist_ok=True)
     os.makedirs(IMAGES_DIR, exist_ok=True)
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -622,6 +624,239 @@ def cmd_resize(args):
         print(f"VM state: shut off (use 'nox start {args.name}' to start)")
 
 
+def cmd_backup(args):
+    """Backup a VM."""
+    if not vm_exists(args.name):
+        print(f"VM '{args.name}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    state = vm_state(args.name)
+    was_running = state == "running"
+    
+    # Stop VM if running for consistent backup
+    if was_running:
+        print(f"Stopping VM '{args.name}' for backup...")
+        virsh(f"shutdown {args.name}")
+        # Wait for shutdown
+        for _ in range(30):
+            if vm_state(args.name) == "shut off":
+                break
+            time.sleep(1)
+        else:
+            print("Warning: VM did not shut down gracefully, forcing shutdown...")
+            virsh(f"destroy {args.name}")
+            time.sleep(2)
+
+    # Create backup directory
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_name = f"{args.name}_{timestamp}"
+    backup_path = os.path.join(BACKUPS_DIR, backup_name)
+    os.makedirs(backup_path, exist_ok=True)
+
+    print(f"Creating backup '{backup_name}'...")
+
+    vm_path = vm_dir(args.name)
+    disk_path = os.path.join(vm_path, f"{args.name}.qcow2")
+
+    try:
+        # Backup disk image
+        print("Backing up disk image...")
+        backup_disk = os.path.join(backup_path, f"{args.name}.qcow2")
+        run(f"cp {disk_path} {backup_disk}")
+
+        # Backup metadata
+        meta = load_meta(args.name)
+        if meta:
+            backup_meta = os.path.join(backup_path, "meta.json")
+            with open(backup_meta, "w") as f:
+                json.dump(meta, f, indent=2)
+
+        # Backup cloud-init files if they exist
+        for filename in ["user-data", "meta-data", "cloud-init.iso"]:
+            src = os.path.join(vm_path, filename)
+            if os.path.exists(src):
+                dst = os.path.join(backup_path, filename)
+                shutil.copy2(src, dst)
+
+        # Get VM XML definition
+        result = virsh(f"dumpxml {args.name}")
+        xml_path = os.path.join(backup_path, "domain.xml")
+        xml_content = result.stdout if isinstance(result.stdout, str) else result.stdout.decode('utf-8')
+        with open(xml_path, "w") as f:
+            f.write(xml_content)
+
+        # Create backup info file
+        backup_info = {
+            "vm_name": args.name,
+            "backup_name": backup_name,
+            "timestamp": timestamp,
+            "was_running": was_running,
+            "metadata": meta,
+        }
+        info_path = os.path.join(backup_path, "backup_info.json")
+        with open(info_path, "w") as f:
+            json.dump(backup_info, f, indent=2)
+
+        print(f"✓ Backup created successfully: {backup_name}")
+        print(f"  Location: {backup_path}")
+
+    except Exception as e:
+        print(f"Error creating backup: {e}", file=sys.stderr)
+        shutil.rmtree(backup_path, ignore_errors=True)
+        sys.exit(1)
+    finally:
+        # Restart VM if it was running
+        if was_running:
+            print(f"Restarting VM '{args.name}'...")
+            virsh(f"start {args.name}")
+
+def cmd_restore(args):
+    """Restore a VM from backup."""
+    backup_path = os.path.join(BACKUPS_DIR, args.backup_name)
+    
+    if not os.path.exists(backup_path):
+        print(f"Backup '{args.backup_name}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    # Load backup info
+    info_path = os.path.join(backup_path, "backup_info.json")
+    if not os.path.exists(info_path):
+        print(f"Invalid backup: missing backup_info.json", file=sys.stderr)
+        sys.exit(1)
+
+    with open(info_path) as f:
+        backup_info = json.load(f)
+
+    original_name = backup_info["vm_name"]
+    restore_name = args.name if args.name else original_name
+
+    # Check if VM already exists
+    if vm_exists(restore_name):
+        if not args.force:
+            print(f"VM '{restore_name}' already exists. Use --force to overwrite.", file=sys.stderr)
+            sys.exit(1)
+        
+        print(f"Deleting existing VM '{restore_name}'...")
+        state = vm_state(restore_name)
+        if state == "running":
+            virsh(f"destroy {restore_name}")
+        virsh(f"undefine {restore_name} --nvram --remove-all-storage", check=False)
+
+    print(f"Restoring VM '{restore_name}' from backup '{args.backup_name}'...")
+
+    # Create VM directory
+    vm_path = vm_dir(restore_name)
+    os.makedirs(vm_path, exist_ok=True)
+
+    try:
+        # Restore disk image
+        print("Restoring disk image...")
+        backup_disk = os.path.join(backup_path, f"{original_name}.qcow2")
+        restore_disk = os.path.join(vm_path, f"{restore_name}.qcow2")
+        run(f"cp {backup_disk} {restore_disk}")
+
+        # Restore metadata
+        backup_meta = os.path.join(backup_path, "meta.json")
+        if os.path.exists(backup_meta):
+            with open(backup_meta) as f:
+                meta = json.load(f)
+            meta["name"] = restore_name
+            save_meta(restore_name, meta)
+
+        # Restore cloud-init files
+        for filename in ["user-data", "meta-data", "cloud-init.iso"]:
+            src = os.path.join(backup_path, filename)
+            if os.path.exists(src):
+                dst = os.path.join(vm_path, filename)
+                shutil.copy2(src, dst)
+
+        # Restore VM from XML
+        xml_path = os.path.join(backup_path, "domain.xml")
+        if os.path.exists(xml_path):
+            # Read and modify XML to update VM name and paths
+            with open(xml_path) as f:
+                xml_content = f.read()
+            
+            # Replace VM name and disk paths
+            xml_content = xml_content.replace(f"<name>{original_name}</name>", f"<name>{restore_name}</name>")
+            xml_content = xml_content.replace(f"{original_name}.qcow2", f"{restore_name}.qcow2")
+            
+            # Write modified XML to temp file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as tmp:
+                tmp.write(xml_content)
+                tmp_xml = tmp.name
+            
+            try:
+                virsh(f"define {tmp_xml}")
+            finally:
+                os.unlink(tmp_xml)
+
+        print(f"✓ VM '{restore_name}' restored successfully!")
+        
+        if backup_info.get("was_running") and not args.no_start:
+            print(f"Starting VM '{restore_name}'...")
+            virsh(f"start {restore_name}")
+        else:
+            print(f"VM '{restore_name}' is ready. Use 'nox start {restore_name}' to start it.")
+
+    except Exception as e:
+        print(f"Error restoring backup: {e}", file=sys.stderr)
+        shutil.rmtree(vm_path, ignore_errors=True)
+        sys.exit(1)
+
+def cmd_list_backups(args):
+    """List all backups."""
+    if not os.path.exists(BACKUPS_DIR):
+        print("No backups found.")
+        return
+
+    backups = []
+    for backup_name in os.listdir(BACKUPS_DIR):
+        backup_path = os.path.join(BACKUPS_DIR, backup_name)
+        if not os.path.isdir(backup_path):
+            continue
+
+        info_path = os.path.join(backup_path, "backup_info.json")
+        if os.path.exists(info_path):
+            with open(info_path) as f:
+                info = json.load(f)
+            backups.append((backup_name, info))
+
+    if not backups:
+        print("No backups found.")
+        return
+
+    print(f"{'BACKUP NAME':<40} {'VM NAME':<20} {'DATE':<20} {'SIZE'}")
+    print("-" * 95)
+
+    for backup_name, info in sorted(backups, key=lambda x: x[1].get("timestamp", ""), reverse=True):
+        vm_name = info.get("vm_name", "?")
+        timestamp = info.get("timestamp", "?")
+        
+        # Format timestamp
+        if timestamp != "?":
+            try:
+                dt = time.strptime(timestamp, "%Y%m%d_%H%M%S")
+                date_str = time.strftime("%Y-%m-%d %H:%M:%S", dt)
+            except:
+                date_str = timestamp
+        else:
+            date_str = "?"
+
+        # Calculate backup size
+        backup_path = os.path.join(BACKUPS_DIR, backup_name)
+        total_size = 0
+        for root, dirs, files in os.walk(backup_path):
+            for f in files:
+                fp = os.path.join(root, f)
+                if os.path.exists(fp):
+                    total_size += os.path.getsize(fp)
+        
+        size_gb = total_size / (1024 ** 3)
+        size_str = f"{size_gb:.2f}GB"
+
+        print(f"{backup_name:<40} {vm_name:<20} {date_str:<20} {size_str}")
+
 def cmd_update(args):
     """Update nox to the latest version from GitHub."""
     import tempfile
@@ -722,6 +957,20 @@ def main():
     p.add_argument("--ram", type=float, default=None, help="New RAM in MB")
     p.add_argument("--disk", type=float, default=None, help="New disk size in GB (can only expand)")
 
+    # backup
+    p = sub.add_parser("backup", help="Backup a VM")
+    p.add_argument("name")
+
+    # restore
+    p = sub.add_parser("restore", help="Restore a VM from backup")
+    p.add_argument("backup_name", help="Name of the backup to restore")
+    p.add_argument("--name", default=None, help="New name for restored VM (default: original name)")
+    p.add_argument("--force", action="store_true", help="Overwrite existing VM")
+    p.add_argument("--no-start", action="store_true", help="Don't start VM after restore")
+
+    # backups
+    sub.add_parser("backups", help="List all backups")
+
     # update
     sub.add_parser("update", aliases=["up"], help="Update nox")
 
@@ -744,6 +993,9 @@ def main():
         "ssh": cmd_ssh,
         "passwd": cmd_passwd,
         "resize": cmd_resize,
+        "backup": cmd_backup,
+        "restore": cmd_restore,
+        "backups": cmd_list_backups,
         "update": cmd_update,
         "up": cmd_update,
     }
