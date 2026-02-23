@@ -659,10 +659,10 @@ def cmd_backup(args):
     disk_path = os.path.join(vm_path, f"{args.name}.qcow2")
 
     try:
-        # Backup disk image
-        print("Backing up disk image...")
+        # Backup disk image with compression
+        print("Backing up disk image (compressed)...")
         backup_disk = os.path.join(backup_path, f"{args.name}.qcow2")
-        run(f"cp {disk_path} {backup_disk}")
+        run(f"qemu-img convert -O qcow2 -c {disk_path} {backup_disk}")
 
         # Backup metadata
         meta = load_meta(args.name)
