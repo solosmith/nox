@@ -696,8 +696,12 @@ def cmd_create(args):
     if network is None:
         network = select_network_interactive()
     else:
-        # plain string from --network flag → wrap as libvirt dict
-        network = {'type': 'libvirt', 'value': network}
+        # Detect if the --network arg is a physical interface or a libvirt network
+        phys = list_physical_interfaces()
+        if network in phys:
+            network = {'type': 'macvtap', 'value': network}
+        else:
+            network = {'type': 'libvirt', 'value': network}
     
     success, password = create_vm(
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
