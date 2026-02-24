@@ -174,6 +174,107 @@ def generate_password():
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(12))
 
+def list_networks():
+    """List available libvirt networks."""
+    try:
+        result = virsh("net-list --all", check=False)
+        if result.returncode != 0:
+            return []
+        
+        output = result.stdout
+        if isinstance(output, bytes):
+            output = output.decode('utf-8')
+        
+        networks = []
+        for line in output.splitlines()[2:]:  # Skip header lines
+            parts = line.split()
+            if len(parts) >= 3:
+                name = parts[0]
+                state = parts[1]
+                networks.append({'name': name, 'state': state})
+        return networks
+    except Exception as e:
+        print(f"Warning: Failed to list networks: {e}", file=sys.stderr)
+        return []
+
+def select_network_interactive():
+    """Interactive network selection using arrow keys."""
+    networks = list_networks()
+    
+    if not networks:
+        print("No networks available. Using 'default'.")
+        return "default"
+    
+    # Filter to only active networks
+    active_networks = [n for n in networks if n['state'] == 'active']
+    if not active_networks:
+        print("No active networks found. Using 'default'.")
+        return "default"
+    
+    try:
+        import curses
+        
+        def select_network(stdscr):
+            curses.curs_set(0)
+            current_idx = 0
+            
+            while True:
+                stdscr.clear()
+                h, w = stdscr.getmaxyx()
+                
+                stdscr.addstr(0, 0, "Select a network for the VM (↑/↓ to navigate, Enter to select, q to quit):", curses.A_BOLD)
+                stdscr.addstr(1, 0, "-" * min(w-1, 80))
+                
+                for idx, net in enumerate(active_networks):
+                    y = idx + 3
+                    if y >= h - 1:
+                        break
+                    
+                    line = f"{net['name']} ({net['state']})"
+                    
+                    if idx == current_idx:
+                        stdscr.addstr(y, 0, f"> {line}", curses.A_REVERSE)
+                    else:
+                        stdscr.addstr(y, 0, f"  {line}")
+                
+                stdscr.refresh()
+                
+                key = stdscr.getch()
+                
+                if key == curses.KEY_UP and current_idx > 0:
+                    current_idx -= 1
+                elif key == curses.KEY_DOWN and current_idx < len(active_networks) - 1:
+                    current_idx += 1
+                elif key == ord('\n'):
+                    return active_networks[current_idx]['name']
+                elif key == ord('q') or key == ord('Q'):
+                    return None
+        
+        result = curses.wrapper(select_network)
+        if result:
+            return result
+        else:
+            print("Network selection cancelled.")
+            sys.exit(0)
+            
+    except Exception as e:
+        # Fallback to numbered selection
+        print("\nAvailable networks:")
+        for idx, net in enumerate(active_networks, 1):
+            print(f"  {idx}. {net['name']} ({net['state']})")
+        
+        while True:
+            try:
+                choice = input(f"\nSelect network (1-{len(active_networks)}): ").strip()
+                idx = int(choice) - 1
+                if 0 <= idx < len(active_networks):
+                    return active_networks[idx]['name']
+                else:
+                    print(f"Invalid choice. Please enter 1-{len(active_networks)}")
+            except (ValueError, KeyboardInterrupt):
+                print("\nNetwork selection cancelled.")
+                sys.exit(0)
+
 # ---------------------------------------------------------------------------
 # S3 Helper Functions
 # ---------------------------------------------------------------------------
@@ -560,9 +661,12 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
 
 def cmd_create(args):
     """Create a new VM and show SSH credentials."""
-    # Use network from args or default to nox-net
-    network = getattr(args, "network", "nox-net")
-
+    # Use network from args or prompt for selection
+    network = getattr(args, "network", None)
+    
+    if network is None:
+        network = select_network_interactive()
+    
     success, password = create_vm(
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
         disk=args.disk, autostart=not getattr(args, "no_autostart", False),
@@ -1225,7 +1329,7 @@ def main():
     p.add_argument("--cpus", type=float, default=None)
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
-    p.add_argument("--network", type=str, default="nox-net", help="Libvirt network to use (default: nox-net)")
+    p.add_argument("--network", type=str, default=None, help="Libvirt network to use (if not specified, interactive selection)")
     p.add_argument("--no-autostart", action="store_true", help="Disable autostart on boot")
     p.add_argument("--no-start", action="store_true", help="Create but don't start VM")
 
