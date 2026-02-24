@@ -723,12 +723,11 @@ def cmd_create(args):
         print(f"\nSSH Access (password shown once):")
         print(f"  Password: {password}")
         if ip:
-            print(f"  Command: ssh nox@{ip}")
+            print(f"  LAN IP:   {ip}")
         else:
-            print(f"  IP not detected yet. Use 'nox list' to find it, then:")
-            print(f"  Command: ssh nox@<IP_ADDRESS>")
-        print(f"\nPasswordless access from host:")
-        print(f"  nox ssh {args.name}")
+            print(f"  IP not detected yet. Use 'nox list' to find it.")
+        print(f"\nConnect via serial console:")
+        print(f"  nox ssh {args.name}  (Ctrl+] to exit)")
         print(f"\nIMPORTANT: Save this password - it won't be shown again!")
         print(f"{'='*60}")
 
@@ -823,16 +822,8 @@ def cmd_ssh(args):
         print(f"VM '{args.name}' is not running. Start it with: nox start {args.name}", file=sys.stderr)
         sys.exit(1)
 
-    ip = vm_ip(args.name, timeout=10)
-    if not ip:
-        print(f"Could not get IP for VM '{args.name}'", file=sys.stderr)
-        sys.exit(1)
-
-    ssh_cmd = ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"nox@{ip}"]
-    if args.ssh_command:
-        ssh_cmd.extend(args.ssh_command)
-
-    os.execvp("ssh", ssh_cmd)
+    print(f"Connecting to '{args.name}' via serial console (press Ctrl+] to exit)...")
+    os.execvp("virsh", ["virsh", "--connect", "qemu:///system", "console", args.name])
 
 def cmd_status(args):
     if not vm_exists(args.name):
