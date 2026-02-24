@@ -560,8 +560,8 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
 
 def cmd_create(args):
     """Create a new VM and show SSH credentials."""
-    # Use nox-net network (bridged to br0)
-    network = "nox-net"
+    # Use network from args or default to nox-net
+    network = getattr(args, "network", "nox-net")
 
     success, password = create_vm(
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
@@ -1225,6 +1225,7 @@ def main():
     p.add_argument("--cpus", type=float, default=None)
     p.add_argument("--ram", type=float, default=None)
     p.add_argument("--disk", type=float, default=None)
+    p.add_argument("--network", type=str, default="nox-net", help="Libvirt network to use (default: nox-net)")
     p.add_argument("--no-autostart", action="store_true", help="Disable autostart on boot")
     p.add_argument("--no-start", action="store_true", help="Create but don't start VM")
 
