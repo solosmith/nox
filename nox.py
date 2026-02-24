@@ -199,7 +199,7 @@ def list_networks():
 
 def list_physical_interfaces():
     """List physical network interfaces suitable for macvtap bridging."""
-    skip = {'lo', 'virbr', 'vnet', 'docker', 'br-', 'veth', 'tun', 'tap'}
+    skip = {'lo', 'virbr', 'vnet', 'docker', 'br-', 'veth', 'tun', 'tap', 'tailscale', 'lxc', 'wg', 'dummy'}
     ifaces = []
     try:
         with open('/proc/net/dev') as f:
