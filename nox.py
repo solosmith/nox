@@ -191,86 +191,101 @@ def list_networks():
             if len(parts) >= 3:
                 name = parts[0]
                 state = parts[1]
-                networks.append({'name': name, 'state': state})
+                networks.append({'name': name, 'state': state, 'type': 'libvirt'})
         return networks
     except Exception as e:
         print(f"Warning: Failed to list networks: {e}", file=sys.stderr)
         return []
 
+def list_physical_interfaces():
+    """List physical network interfaces suitable for macvtap bridging."""
+    skip = {'lo', 'virbr', 'vnet', 'docker', 'br-', 'veth', 'tun', 'tap'}
+    ifaces = []
+    try:
+        with open('/proc/net/dev') as f:
+            for line in f.readlines()[2:]:
+                iface = line.split(':')[0].strip()
+                # Skip virtual/loopback interfaces
+                if any(iface.startswith(s) for s in skip):
+                    continue
+                # Only include interfaces that are UP
+                result = run(f"ip link show {iface}", check=False)
+                out = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+                if 'UP' in out:
+                    ifaces.append(iface)
+    except Exception as e:
+        print(f"Warning: Failed to list physical interfaces: {e}", file=sys.stderr)
+    return ifaces
+
 def select_network_interactive():
-    """Interactive network selection using arrow keys."""
-    networks = list_networks()
-    
-    if not networks:
+    """Interactive network selection - shows both libvirt networks and physical interfaces."""
+    libvirt_nets = [n for n in list_networks() if n['state'] == 'active']
+    phys_ifaces = list_physical_interfaces()
+
+    # Build unified entry list
+    # Each entry: {'label': str, 'type': 'libvirt'|'macvtap', 'value': str}
+    entries = []
+    for n in libvirt_nets:
+        entries.append({'label': f"{n['name']}  [NAT/virtual]", 'type': 'libvirt', 'value': n['name']})
+    for iface in phys_ifaces:
+        entries.append({'label': f"{iface}  [physical - macvtap]", 'type': 'macvtap', 'value': iface})
+
+    if not entries:
         print("No networks available. Using 'default'.")
-        return "default"
-    
-    # Filter to only active networks
-    active_networks = [n for n in networks if n['state'] == 'active']
-    if not active_networks:
-        print("No active networks found. Using 'default'.")
-        return "default"
-    
+        return {'type': 'libvirt', 'value': 'default'}
+
     try:
         import curses
-        
-        def select_network(stdscr):
+
+        def _menu(stdscr):
             curses.curs_set(0)
             current_idx = 0
-            
+
             while True:
                 stdscr.clear()
                 h, w = stdscr.getmaxyx()
-                
-                stdscr.addstr(0, 0, "Select a network for the VM (↑/↓ to navigate, Enter to select, q to quit):", curses.A_BOLD)
-                stdscr.addstr(1, 0, "-" * min(w-1, 80))
-                
-                for idx, net in enumerate(active_networks):
+                stdscr.addstr(0, 0, "Select network (↑/↓ navigate, Enter select, q quit):", curses.A_BOLD)
+                stdscr.addstr(1, 0, "-" * min(w - 1, 70))
+
+                for idx, entry in enumerate(entries):
                     y = idx + 3
                     if y >= h - 1:
                         break
-                    
-                    line = f"{net['name']} ({net['state']})"
-                    
                     if idx == current_idx:
-                        stdscr.addstr(y, 0, f"> {line}", curses.A_REVERSE)
+                        stdscr.addstr(y, 0, f"> {entry['label']}", curses.A_REVERSE)
                     else:
-                        stdscr.addstr(y, 0, f"  {line}")
-                
+                        stdscr.addstr(y, 0, f"  {entry['label']}")
+
                 stdscr.refresh()
-                
                 key = stdscr.getch()
-                
+
                 if key == curses.KEY_UP and current_idx > 0:
                     current_idx -= 1
-                elif key == curses.KEY_DOWN and current_idx < len(active_networks) - 1:
+                elif key == curses.KEY_DOWN and current_idx < len(entries) - 1:
                     current_idx += 1
                 elif key == ord('\n'):
-                    return active_networks[current_idx]['name']
-                elif key == ord('q') or key == ord('Q'):
+                    return entries[current_idx]
+                elif key in (ord('q'), ord('Q')):
                     return None
-        
-        result = curses.wrapper(select_network)
+
+        result = curses.wrapper(_menu)
         if result:
             return result
-        else:
-            print("Network selection cancelled.")
-            sys.exit(0)
-            
-    except Exception as e:
-        # Fallback to numbered selection
+        print("Network selection cancelled.")
+        sys.exit(0)
+
+    except Exception:
+        # Fallback: numbered list
         print("\nAvailable networks:")
-        for idx, net in enumerate(active_networks, 1):
-            print(f"  {idx}. {net['name']} ({net['state']})")
-        
+        for idx, entry in enumerate(entries, 1):
+            print(f"  {idx}. {entry['label']}")
         while True:
             try:
-                choice = input(f"\nSelect network (1-{len(active_networks)}): ").strip()
+                choice = input(f"\nSelect network (1-{len(entries)}): ").strip()
                 idx = int(choice) - 1
-                if 0 <= idx < len(active_networks):
-                    return active_networks[idx]['name']
-                else:
-                    print(f"Invalid choice. Please enter 1-{len(active_networks)}")
+                if 0 <= idx < len(entries):
+                    return entries[idx]
+                print(f"Invalid choice. Please enter 1-{len(entries)}")
             except (ValueError, KeyboardInterrupt):
                 print("\nNetwork selection cancelled.")
                 sys.exit(0)
@@ -536,7 +551,7 @@ local-hostname: {name}
 # ---------------------------------------------------------------------------
 
 def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
-              autostart=False, password=None, start=True, network="nox-net"):
+              autostart=False, password=None, start=True, network=None):
     """Create a new VM."""
     if vm_exists(name):
         print(f"VM '{name}' already exists.")
@@ -557,6 +572,17 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
 
     if password is None:
         password = generate_password()
+
+    # Resolve network spec: accept dict (from interactive) or plain string
+    if network is None:
+        network = {'type': 'libvirt', 'value': 'nox-net'}
+    elif isinstance(network, str):
+        network = {'type': 'libvirt', 'value': network}
+
+    if network['type'] == 'macvtap':
+        network_arg = f"type=direct,source={network['value']},source_mode=bridge,model=virtio"
+    else:
+        network_arg = f"network={network['value']},model=virtio"
 
     print(f"Creating VM '{name}': os={os_name} vcpus={vcpus} ram={ram_mb}MB disk={disk_gb}GB")
 
@@ -607,23 +633,26 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
     run(f"genisoimage -output {cloud_init_iso} -volid cidata -joliet -rock {user_data_path} {meta_data_path}")
 
     # Create VM with virt-install
-    cmd = f"""virt-install \\
-        --connect qemu:///system \\
-        --name {name} \\
-        --memory {ram_mb} \\
-        --vcpus {vcpus} \\
-        --cpu host-passthrough \\
-        --disk {disk_path},format=qcow2,bus=virtio,cache=writeback,io=threads \\
-        --disk {cloud_init_iso},device=cdrom \\
-        --os-variant generic \\
-        --network network={network},model=virtio \\
-        --graphics none \\
-        --console pty,target_type=serial \\
-        --import \\
-        --noautoconsole"""
-
+    cmd_parts = [
+        "virt-install",
+        "--connect", "qemu:///system",
+        "--name", name,
+        "--memory", str(ram_mb),
+        "--vcpus", str(vcpus),
+        "--cpu", "host-passthrough",
+        "--disk", f"{disk_path},format=qcow2,bus=virtio,cache=writeback,io=threads",
+        "--disk", f"{cloud_init_iso},device=cdrom",
+        "--os-variant", "generic",
+        "--network", network_arg,
+        "--graphics", "none",
+        "--console", "pty,target_type=serial",
+        "--import",
+        "--noautoconsole",
+    ]
     if not start:
-        cmd += " --noreboot"
+        cmd_parts.append("--noreboot")
+
+    cmd = " ".join(cmd_parts)
 
     try:
         run(cmd)
@@ -666,6 +695,9 @@ def cmd_create(args):
     
     if network is None:
         network = select_network_interactive()
+    else:
+        # plain string from --network flag → wrap as libvirt dict
+        network = {'type': 'libvirt', 'value': network}
     
     success, password = create_vm(
         args.name, os_name=args.os, cpus=args.cpus, ram=args.ram,
