@@ -753,16 +753,34 @@ def cmd_restart(args):
     print(f"VM '{args.name}' restarted.")
 
 def cleanup_macvtap(name):
-    """Remove stale macvtap interfaces left behind by a deleted VM."""
+    """Remove the macvtap interface belonging to a specific VM."""
     try:
-        result = run("ip link show", check=False)
+        # Get the VM's MAC address from its XML before it's undefined
+        result = virsh(f"dumpxml {name}", check=False)
+        if result.returncode != 0:
+            return
         out = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
-        for line in out.splitlines():
-            if "macvtap" in line:
-                # format: "5: macvtap0@eth0: ..."
-                iface = line.split(":")[1].strip().split("@")[0]
-                run(f"ip link delete {iface}", check=False)
-                print(f"Removed stale interface {iface}")
+
+        import re
+        # Find MAC addresses used by this VM
+        macs = set(m.lower() for m in re.findall(r"mac address='([^']+)'", out))
+        if not macs:
+            return
+
+        # Find macvtap interfaces matching those MACs
+        links = run("ip link show", check=False)
+        links_out = links.stdout if isinstance(links.stdout, str) else links.stdout.decode()
+
+        current_iface = None
+        for line in links_out.splitlines():
+            if "macvtap" in line and ":" in line:
+                current_iface = line.split(":")[1].strip().split("@")[0]
+            elif current_iface and "link/ether" in line:
+                mac = line.strip().split()[1].lower()
+                if mac in macs:
+                    run(f"ip link delete {current_iface}", check=False)
+                    print(f"Removed macvtap interface {current_iface}")
+                current_iface = None
     except Exception as e:
         print(f"Warning: macvtap cleanup failed: {e}", file=sys.stderr)
 
@@ -780,8 +798,8 @@ def cmd_delete(args):
     if state == "running":
         virsh(f"destroy {args.name}")
 
-    virsh(f"undefine {args.name} --nvram --remove-all-storage")
     cleanup_macvtap(args.name)
+    virsh(f"undefine {args.name} --nvram --remove-all-storage")
     d = vm_dir(args.name)
     if os.path.exists(d):
         shutil.rmtree(d)
