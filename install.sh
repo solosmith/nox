@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# nox installer - Complete installation script
+# nox installer - Complete installation script for KVM/libvirt
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -13,7 +13,7 @@ error() { echo -e "${RED}[nox]${NC} $*" >&2; }
 
 # Check if running on macOS
 if [[ "$OSTYPE" == "darwin"* ]]; then
-    error "macOS is not supported. Please use a Linux system (Debian, Ubuntu, or Alpine)."
+    error "macOS is not supported. Please use a Linux system with KVM support."
     exit 1
 fi
 
@@ -27,7 +27,7 @@ fi
 # GitHub repository URL
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solosmith/nox/main"
 
-info "nox - LXC Container Manager"
+info "nox - Lightweight VM Manager using KVM/libvirt"
 info "========================================"
 
 # Check if nox is already installed
@@ -80,7 +80,6 @@ if check_existing_installation; then
     fi
 else
     # Update available - install script always checks dependencies
-    # nox update command only updates the app
     info "Will update nox and verify dependencies"
 fi
 
@@ -105,263 +104,229 @@ detect_arch() {
     esac
 }
 
-is_virtualized() {
-    # Check if running in a VM or container
-    if [ -f /proc/cpuinfo ]; then
-        if grep -qi "hypervisor" /proc/cpuinfo; then
+check_kvm_support() {
+    info "Checking KVM support..."
+    
+    local arch=$(detect_arch)
+    
+    if [ "$arch" = "amd64" ]; then
+        # Check for Intel VT-x or AMD-V
+        if grep -qE 'vmx|svm' /proc/cpuinfo; then
+            info "✓ CPU supports hardware virtualization (VT-x/AMD-V)"
             return 0
+        else
+            warn "⚠ CPU does not support hardware virtualization"
+            warn "VMs will run in emulation mode (slow)"
+            return 1
+        fi
+    elif [ "$arch" = "arm64" ]; then
+        # ARM64 virtualization check
+        if [ -c /dev/kvm ]; then
+            info "✓ KVM device found (/dev/kvm)"
+            return 0
+        else
+            warn "⚠ /dev/kvm not found - checking kernel support..."
+            if dmesg | grep -qi "kvm.*hyp mode initialized"; then
+                info "✓ KVM initialized in kernel"
+                return 0
+            else
+                warn "⚠ KVM may not be available on this ARM64 system"
+                return 1
+            fi
         fi
     fi
-    if systemd-detect-virt >/dev/null 2>&1; then
-        local virt=$(systemd-detect-virt)
-        if [ "$virt" != "none" ]; then
-            return 0
-        fi
-    fi
+    
     return 1
+}
+
+enable_kvm() {
+    info "Enabling KVM..."
+    
+    local arch=$(detect_arch)
+    
+    # Load KVM modules
+    if [ "$arch" = "amd64" ]; then
+        # Try Intel first, then AMD
+        if grep -q "vmx" /proc/cpuinfo; then
+            $SUDO modprobe kvm_intel 2>/dev/null || $SUDO modprobe kvm 2>/dev/null || true
+        elif grep -q "svm" /proc/cpuinfo; then
+            $SUDO modprobe kvm_amd 2>/dev/null || $SUDO modprobe kvm 2>/dev/null || true
+        fi
+    elif [ "$arch" = "arm64" ]; then
+        # ARM64 KVM is usually built-in, but try loading if module exists
+        $SUDO modprobe kvm 2>/dev/null || true
+    fi
+    
+    # Verify KVM device exists
+    if [ -c /dev/kvm ]; then
+        info "✓ KVM device available: /dev/kvm"
+        
+        # Set proper permissions
+        if [ -n "$SUDO" ]; then
+            local user=$(whoami)
+            $SUDO chown root:kvm /dev/kvm 2>/dev/null || true
+            $SUDO chmod 660 /dev/kvm 2>/dev/null || true
+        fi
+    else
+        warn "⚠ /dev/kvm not available - VMs will use emulation"
+    fi
 }
 
 install_debian() {
     info "Installing/updating dependencies (Debian/Ubuntu)..."
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq \
-        lxc \
-        lxc-templates \
+    $SUDO apt-get update -qq
+    $SUDO apt-get install -y -qq \
+        qemu-system \
+        qemu-utils \
+        libvirt-daemon-system \
+        libvirt-clients \
+        virtinst \
         bridge-utils \
-        debootstrap \
+        genisoimage \
         python3 \
-        openssh-client
-
-    # Check if running in virtualized environment
-    if is_virtualized; then
-        warn "Detected virtualized environment - using isolated networking"
-        warn "For local network access, install on physical hardware"
-
-        # Use isolated bridge with NAT
-        if ! ip link show lxcbr0 >/dev/null 2>&1; then
-            info "Creating isolated bridge lxcbr0..."
-            sudo brctl addbr lxcbr0
-            sudo ip addr add 10.0.3.1/24 dev lxcbr0
-            sudo ip link set lxcbr0 up
-
-            # Setup NAT for internet access
-            PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-            sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 -o "$PRIMARY_IF" -j MASQUERADE
-            sudo iptables -A FORWARD -i lxcbr0 -o "$PRIMARY_IF" -j ACCEPT
-            sudo iptables -A FORWARD -i "$PRIMARY_IF" -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-        fi
-    else
-        # Detect primary network interface
-        PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-        info "Detected primary interface: $PRIMARY_IF"
-
-        # Create bridge on physical interface for local network access
-        if ! ip link show lxcbr0 >/dev/null 2>&1; then
-            info "Creating bridge lxcbr0 on $PRIMARY_IF..."
-            sudo brctl addbr lxcbr0
-            sudo brctl addif lxcbr0 "$PRIMARY_IF"
-
-            # Get current IP config from primary interface
-            PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-            PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
-            PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-            # Move IP from interface to bridge
-            if [ -n "$PRIMARY_IP" ]; then
-                sudo ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" || true
-                sudo ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
-            fi
-
-            sudo ip link set lxcbr0 up
-            sudo ip link set "$PRIMARY_IF" up
-
-            # Restore default route
-            if [ -n "$PRIMARY_GW" ]; then
-                sudo ip route add default via "$PRIMARY_GW" dev lxcbr0 || true
-            fi
-        fi
-    fi
-
-    # Enable IP forwarding
-    sudo sysctl -w net.ipv4.ip_forward=1
-    echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf >/dev/null
-
-    # Update LXC default config to use bridge
-    sudo tee /etc/lxc/default.conf > /dev/null <<EOF
-lxc.net.0.type = veth
-lxc.net.0.link = lxcbr0
-lxc.net.0.flags = up
-lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
-EOF
-
-    # Disable lxc-net service (we're using our own bridge)
-    sudo systemctl disable lxc-net || true
-    sudo systemctl stop lxc-net || true
+        openssh-client \
+        dnsmasq-base
+    
+    # Enable and start libvirtd
+    $SUDO systemctl enable libvirtd
+    $SUDO systemctl start libvirtd
+    
+    # Enable KVM
+    enable_kvm
+    
+    # Configure default network
+    configure_libvirt_network
 }
 
 install_alpine() {
     info "Installing/updating dependencies (Alpine)..."
-    sudo apk add \
-        lxc \
-        lxc-templates \
-        lxc-download \
+    $SUDO apk add \
+        qemu-system-x86_64 \
+        qemu-system-aarch64 \
+        qemu-img \
+        libvirt-daemon \
+        libvirt-client \
+        virt-install \
         bridge-utils \
-        iptables \
+        cdrkit \
         python3 \
-        openssh-client
+        openssh-client \
+        dnsmasq
+    
+    # Enable and start libvirtd
+    $SUDO rc-update add libvirtd boot || true
+    $SUDO service libvirtd start || true
+    
+    # Enable KVM
+    enable_kvm
+    
+    # Configure default network
+    configure_libvirt_network
+}
 
-    # Enable lxc service
-    sudo rc-update add lxc boot || true
-    sudo service lxc start || true
-
-    # Check if running in virtualized environment
-    if is_virtualized; then
-        warn "Detected virtualized environment - using isolated networking"
-        warn "For local network access, install on physical hardware"
-
-        # Use isolated bridge with NAT
-        if ! ip link show lxcbr0 >/dev/null 2>&1; then
-            info "Creating isolated bridge lxcbr0..."
-            sudo brctl addbr lxcbr0
-            sudo ip addr add 10.0.3.1/24 dev lxcbr0
-            sudo ip link set lxcbr0 up
-
-            # Setup NAT for internet access
-            PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-            sudo iptables -t nat -A POSTROUTING -s 10.0.3.0/24 -o "$PRIMARY_IF" -j MASQUERADE
-            sudo iptables -A FORWARD -i lxcbr0 -o "$PRIMARY_IF" -j ACCEPT
-            sudo iptables -A FORWARD -i "$PRIMARY_IF" -o lxcbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-        fi
+configure_libvirt_network() {
+    info "Configuring libvirt networks..."
+    
+    # Start default network if it exists
+    if virsh --connect qemu:///system net-list --all 2>/dev/null | grep -q "default"; then
+        virsh --connect qemu:///system net-start default 2>/dev/null || true
+        virsh --connect qemu:///system net-autostart default 2>/dev/null || true
+        info "✓ Default network configured"
     else
-        # Detect primary network interface
-        PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-        info "Detected primary interface: $PRIMARY_IF"
-
-        # Configure LXC bridge networking for Alpine
-        info "Configuring LXC bridge networking..."
-
-        # Create bridge on physical interface
-        if ! ip link show lxcbr0 >/dev/null 2>&1; then
-            info "Creating bridge lxcbr0 on $PRIMARY_IF..."
-            sudo brctl addbr lxcbr0
-            sudo brctl addif lxcbr0 "$PRIMARY_IF"
-
-            # Get current IP config from primary interface
-            PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-            PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
-            PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
-
-            # Move IP from interface to bridge
-            if [ -n "$PRIMARY_IP" ]; then
-                sudo ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" || true
-                sudo ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
-            fi
-
-            sudo ip link set lxcbr0 up
-            sudo ip link set "$PRIMARY_IF" up
-
-            # Restore default route
-            if [ -n "$PRIMARY_GW" ]; then
-                sudo ip route add default via "$PRIMARY_GW" dev lxcbr0 || true
-            fi
-        fi
+        warn "⚠ Default network not found - will be created on first VM"
     fi
-
-    # Enable IP forwarding
-    sudo sysctl -w net.ipv4.ip_forward=1
-    echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf >/dev/null
-
-    # Create bridge startup script for Alpine
-    if ! is_virtualized; then
-        sudo tee /etc/local.d/lxc-bridge.start > /dev/null <<'EOF'
-#!/bin/sh
-PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-if ! ip link show lxcbr0 >/dev/null 2>&1; then
-    brctl addbr lxcbr0
-    brctl addif lxcbr0 "$PRIMARY_IF"
-    PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
-    PRIMARY_MASK=$(ip -4 addr show "$PRIMARY_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}/\d+' | cut -d'/' -f2)
-    if [ -n "$PRIMARY_IP" ]; then
-        ip addr del "$PRIMARY_IP/$PRIMARY_MASK" dev "$PRIMARY_IF" 2>/dev/null || true
-        ip addr add "$PRIMARY_IP/$PRIMARY_MASK" dev lxcbr0
-    fi
-    ip link set lxcbr0 up
-    ip link set "$PRIMARY_IF" up
-    PRIMARY_GW=$(ip route | grep default | awk '{print $3}' | head -n1)
-    if [ -n "$PRIMARY_GW" ]; then
-        ip route add default via "$PRIMARY_GW" dev lxcbr0 2>/dev/null || true
-    fi
-fi
-sysctl -w net.ipv4.ip_forward=1
+    
+    # Create nox-net network if it doesn't exist
+    if ! virsh --connect qemu:///system net-list --all 2>/dev/null | grep -q "nox-net"; then
+        info "Creating nox-net network..."
+        
+        # Find available bridge number
+        local bridge_num=1
+        while ip link show virbr${bridge_num} >/dev/null 2>&1; do
+            bridge_num=$((bridge_num + 1))
+        done
+        
+        # Find available subnet
+        local subnet_third=100
+        while ip route | grep -q "192.168.${subnet_third}."; do
+            subnet_third=$((subnet_third + 1))
+        done
+        
+        virsh --connect qemu:///system net-define /dev/stdin <<EOF
+<network>
+  <name>nox-net</name>
+  <forward mode='nat'/>
+  <bridge name='virbr${bridge_num}' stp='on' delay='0'/>
+  <ip address='192.168.${subnet_third}.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.${subnet_third}.2' end='192.168.${subnet_third}.254'/>
+    </dhcp>
+  </ip>
+</network>
 EOF
-        sudo chmod +x /etc/local.d/lxc-bridge.start
-        sudo rc-update add local boot || true
+        
+        virsh --connect qemu:///system net-start nox-net 2>/dev/null || true
+        virsh --connect qemu:///system net-autostart nox-net 2>/dev/null || true
+        info "✓ nox-net network created (192.168.${subnet_third}.0/24)"
+    else
+        info "✓ nox-net network already exists"
     fi
 }
 
-configure_lxc() {
-    info "Configuring LXC..."
-
-    # Create default LXC config if it doesn't exist
-    if [ ! -f /etc/lxc/default.conf ]; then
-        sudo mkdir -p /etc/lxc
-        sudo tee /etc/lxc/default.conf > /dev/null <<EOF
-lxc.net.0.type = veth
-lxc.net.0.link = lxcbr0
-lxc.net.0.flags = up
-lxc.net.0.hwaddr = 00:16:3e:xx:xx:xx
-EOF
-    fi
-
-    # Ensure lxc bridge is configured
-    if [ ! -f /etc/default/lxc-net ]; then
-        sudo mkdir -p /etc/default
-        sudo tee /etc/default/lxc-net > /dev/null <<EOF
-USE_LXC_BRIDGE="true"
-LXC_BRIDGE="lxcbr0"
-LXC_ADDR="10.0.3.1"
-LXC_NETMASK="255.255.255.0"
-LXC_NETWORK="10.0.3.0/24"
-LXC_DHCP_RANGE="10.0.3.2,10.0.3.254"
-LXC_DHCP_MAX="253"
-EOF
-    fi
-}
-
-enable_user_lxc() {
+enable_user_permissions() {
     info "Configuring user permissions..."
     local user
     user=$(whoami)
-
-    # Add user to lxc-related groups if they exist
-    for group in lxc lxc-dnsmasq; do
+    
+    # Add user to libvirt and kvm groups
+    for group in libvirt libvirt-qemu kvm; do
         if getent group "$group" >/dev/null 2>&1; then
-            sudo usermod -aG "$group" "$user" 2>/dev/null || true
+            $SUDO usermod -aG "$group" "$user" 2>/dev/null || true
+            info "✓ Added $user to $group group"
         fi
     done
-
-    # Configure subuid/subgid for unprivileged containers
-    if ! grep -q "^$user:" /etc/subuid 2>/dev/null; then
-        echo "$user:100000:65536" | sudo tee -a /etc/subuid >/dev/null
-    fi
-    if ! grep -q "^$user:" /etc/subgid 2>/dev/null; then
-        echo "$user:100000:65536" | sudo tee -a /etc/subgid >/dev/null
+    
+    # Configure polkit for libvirt access without password
+    if [ -d /etc/polkit-1/rules.d ]; then
+        $SUDO tee /etc/polkit-1/rules.d/50-libvirt.rules > /dev/null <<EOF
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.libvirt.unix.manage" &&
+        subject.isInGroup("libvirt")) {
+            return polkit.Result.YES;
+    }
+});
+EOF
+        info "✓ Configured polkit for libvirt access"
     fi
 }
 
 verify_install() {
     local ok=true
     info "Verifying installation..."
-
-    for cmd in lxc-create lxc-start lxc-stop python3; do
+    
+    for cmd in virsh qemu-img virt-install python3; do
         if command -v "$cmd" >/dev/null 2>&1; then
-            info "  $cmd: $(command -v "$cmd")"
+            info "  ✓ $cmd: $(command -v "$cmd")"
         else
-            error "  $cmd: NOT FOUND"
+            error "  ✗ $cmd: NOT FOUND"
             ok=false
         fi
     done
-
+    
+    # Check libvirtd status
+    if systemctl is-active --quiet libvirtd 2>/dev/null || service libvirtd status >/dev/null 2>&1; then
+        info "  ✓ libvirtd: running"
+    else
+        warn "  ⚠ libvirtd: not running"
+    fi
+    
+    # Check KVM
+    if [ -c /dev/kvm ]; then
+        info "  ✓ KVM: available"
+    else
+        warn "  ⚠ KVM: not available (will use emulation)"
+    fi
+    
     if [ "$ok" = true ]; then
         info "All dependencies installed successfully."
     else
@@ -375,7 +340,10 @@ main() {
     distro=$(detect_distro)
     arch=$(detect_arch)
     info "Detected: distro=$distro arch=$arch"
-
+    
+    # Check KVM support
+    check_kvm_support || warn "Continuing without KVM acceleration"
+    
     if [ "$SKIP_DEPS" = false ]; then
         case "$distro" in
             debian|ubuntu|raspbian|linuxmint|pop)
@@ -385,24 +353,23 @@ main() {
             *)
                 error "Unsupported distro: $distro"
                 error "Supported: Debian, Ubuntu, Alpine"
-                error "Please install manually: lxc, lxc-templates, bridge-utils, python3"
+                error "Please install manually: qemu, libvirt, virt-install, python3"
                 exit 1 ;;
         esac
-
-        configure_lxc
-        enable_user_lxc
+        
+        enable_user_permissions
         verify_install
     else
         info "Skipping dependency installation"
     fi
-
+    
     # Download and install nox.py
     info ""
     info "Installing nox command..."
-
+    
     TEMP_DIR=$(mktemp -d)
     cd "$TEMP_DIR"
-
+    
     if command -v curl >/dev/null 2>&1; then
         curl -fsSL "$GITHUB_RAW_URL/nox.py" -o nox.py || {
             error "Failed to download nox.py from GitHub"
@@ -438,31 +405,40 @@ main() {
         rm -rf "$TEMP_DIR"
         exit 0
     fi
-
+    
     # Get version from downloaded file
     INSTALL_VERSION=$(cat VERSION)
-
+    
     $SUDO cp nox.py /usr/local/bin/nox
     $SUDO chmod +x /usr/local/bin/nox
     $SUDO cp VERSION /usr/local/bin/VERSION
-
+    
     cd /
     rm -rf "$TEMP_DIR"
-
+    
     # Setup SSH key if not exists
     if [ ! -f ~/.ssh/id_ed25519 ]; then
         info "Generating SSH key for passwordless access..."
         ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N '' -q
     fi
-
+    
     info ""
     info "✓ nox installed successfully! (version $INSTALL_VERSION)"
     info ""
-    info "Quick start:"
+    
+    # Show post-install instructions
+    if groups | grep -qE "libvirt|kvm"; then
+        info "Quick start:"
+    else
+        warn "IMPORTANT: You need to log out and log back in for group changes to take effect!"
+        info ""
+        info "After logging back in, quick start:"
+    fi
+    
     info "  nox --version"
-    info "  nox create mycontainer --os debian"
+    info "  nox create myvm --os debian --cpus 2 --ram 1024 --disk 10"
     info "  nox list"
-    info "  nox ssh mycontainer"
+    info "  nox ssh myvm"
     info ""
     info "Update nox: nox update"
     info "For more: https://github.com/solosmith/nox"
