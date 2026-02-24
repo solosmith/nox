@@ -199,7 +199,7 @@ def list_networks():
 
 def list_physical_interfaces():
     """List physical network interfaces suitable for macvtap bridging."""
-    skip = {'lo', 'virbr', 'vnet', 'docker', 'br-', 'veth', 'tun', 'tap', 'tailscale', 'lxc', 'wg', 'dummy'}
+    skip = {'lo', 'virbr', 'vnet', 'docker', 'br-', 'veth', 'tun', 'tap', 'tailscale', 'lxc', 'wg', 'dummy', 'wlan'}
     ifaces = []
     try:
         with open('/proc/net/dev') as f:
@@ -674,6 +674,8 @@ def create_vm(name, os_name=None, cpus=None, ram=None, disk=None,
         "ram_mb": ram_mb,
         "disk_gb": disk_gb,
         "autostart": autostart,
+        "network_type": network['type'],
+        "network_value": network['value'],
     }
     save_meta(name, meta)
 
@@ -855,6 +857,44 @@ def cmd_ssh(args):
         print(f"VM '{args.name}' is not running. Start it with: nox start {args.name}", file=sys.stderr)
         sys.exit(1)
 
+    if args.ssh_command:
+        # Run command inside VM via qemu guest agent
+        import json, base64
+        cmd_str = " ".join(args.ssh_command)
+        ga_cmd = json.dumps({
+            "execute": "guest-exec",
+            "arguments": {
+                "path": "/bin/bash",
+                "arg": ["-c", cmd_str],
+                "capture-output": True
+            }
+        })
+        try:
+            result = virsh(f"qemu-agent-command {args.name} '{ga_cmd}'")
+            stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+            data = json.loads(stdout)
+            pid = data.get("return", {}).get("pid")
+            if pid is None:
+                print("Failed to execute command in VM", file=sys.stderr)
+                sys.exit(1)
+            for _ in range(60):
+                time.sleep(1)
+                status_cmd = json.dumps({"execute": "guest-exec-status", "arguments": {"pid": pid}})
+                res2 = virsh(f"qemu-agent-command {args.name} '{status_cmd}'")
+                out2 = res2.stdout if isinstance(res2.stdout, str) else res2.stdout.decode()
+                status = json.loads(out2).get("return", {})
+                if status.get("exited"):
+                    if status.get("out-data"):
+                        print(base64.b64decode(status["out-data"]).decode(), end="")
+                    if status.get("err-data"):
+                        print(base64.b64decode(status["err-data"]).decode(), end="", file=sys.stderr)
+                    sys.exit(status.get("exitcode", 0))
+            print("Command timed out", file=sys.stderr)
+            sys.exit(1)
+        except RuntimeError as e:
+            print(f"Failed to run command: {e}", file=sys.stderr)
+            sys.exit(1)
+
     print(f"Connecting to '{args.name}' via serial console (press Ctrl+] to exit)...")
     os.execvp("virsh", ["virsh", "--connect", "qemu:///system", "console", args.name])
 
@@ -882,7 +922,8 @@ def cmd_passwd(args):
 
     # Change password via qemu guest agent (works without network)
     import json, base64
-    cmd_str = f"echo 'nox:{new_password}' | chpasswd"
+    pw_b64 = base64.b64encode(f"nox:{new_password}".encode()).decode()
+    cmd_str = f"echo $(echo {pw_b64} | base64 -d) | chpasswd"
     ga_cmd = json.dumps({
         "execute": "guest-exec",
         "arguments": {
@@ -1209,6 +1250,7 @@ def cmd_restore(args):
         state = vm_state(restore_name)
         if state == "running":
             virsh(f"destroy {restore_name}")
+        cleanup_macvtap(restore_name)
         virsh(f"undefine {restore_name} --nvram --remove-all-storage", check=False)
 
     print(f"Restoring VM '{restore_name}' from backup '{backup_name}'...")
