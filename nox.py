@@ -752,6 +752,20 @@ def cmd_restart(args):
     virsh(f"reboot {args.name}")
     print(f"VM '{args.name}' restarted.")
 
+def cleanup_macvtap(name):
+    """Remove stale macvtap interfaces left behind by a deleted VM."""
+    try:
+        result = run("ip link show", check=False)
+        out = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+        for line in out.splitlines():
+            if "macvtap" in line:
+                # format: "5: macvtap0@eth0: ..."
+                iface = line.split(":")[1].strip().split("@")[0]
+                run(f"ip link delete {iface}", check=False)
+                print(f"Removed stale interface {iface}")
+    except Exception as e:
+        print(f"Warning: macvtap cleanup failed: {e}", file=sys.stderr)
+
 def cmd_delete(args):
     if not vm_exists(args.name):
         d = vm_dir(args.name)
@@ -767,6 +781,7 @@ def cmd_delete(args):
         virsh(f"destroy {args.name}")
 
     virsh(f"undefine {args.name} --nvram --remove-all-storage")
+    cleanup_macvtap(args.name)
     d = vm_dir(args.name)
     if os.path.exists(d):
         shutil.rmtree(d)
