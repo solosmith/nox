@@ -151,10 +151,33 @@ def save_meta(name, meta):
         json.dump(meta, f, indent=2)
 
 def vm_ip(name, timeout=60):
-    """Get VM IP address using qemu-guest-agent."""
+    """Get VM IP address using multiple methods (lease, arp, agent)."""
     deadline = time.time() + timeout
 
     while time.time() < deadline:
+        # Try DHCP lease first (fastest, works immediately)
+        result = virsh(f"domifaddr {name} --source lease", check=False)
+        if result.returncode == 0:
+            stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode('utf-8')
+            for line in stdout.splitlines():
+                if "ipv4" in line.lower() and "127.0.0.1" not in line:
+                    parts = line.split()
+                    for part in parts:
+                        if "/" in part and not part.startswith("127."):
+                            return part.split("/")[0]
+        
+        # Try ARP table (works without guest agent)
+        result = virsh(f"domifaddr {name} --source arp", check=False)
+        if result.returncode == 0:
+            stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode('utf-8')
+            for line in stdout.splitlines():
+                if "ipv4" in line.lower() and "127.0.0.1" not in line:
+                    parts = line.split()
+                    for part in parts:
+                        if "/" in part and not part.startswith("127."):
+                            return part.split("/")[0]
+        
+        # Try qemu-guest-agent (most reliable once installed)
         result = virsh(f"domifaddr {name} --source agent", check=False)
         if result.returncode == 0:
             stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode('utf-8')
