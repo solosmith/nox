@@ -834,7 +834,7 @@ def cmd_status(args):
     print(result.stdout)
 
 def cmd_passwd(args):
-    """Change SSH password for a VM."""
+    """Change password for a VM user via qemu guest agent."""
     if not vm_exists(args.name):
         print(f"VM '{args.name}' does not exist.", file=sys.stderr)
         sys.exit(1)
@@ -845,27 +845,51 @@ def cmd_passwd(args):
         sys.exit(1)
 
     print(f"Generating new password for VM '{args.name}'...")
-    ip = vm_ip(args.name, timeout=10)
-    if not ip:
-        print(f"Could not get IP for VM '{args.name}'", file=sys.stderr)
-        sys.exit(1)
-
-    # Generate new password
     new_password = generate_password()
 
-    # Change password via SSH
-    ssh_cmd = f"ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null nox@{ip} \"echo 'nox:{new_password}' | sudo chpasswd\""
-    
+    # Change password via qemu guest agent (works without network)
+    import json, base64
+    cmd_str = f"echo 'nox:{new_password}' | chpasswd"
+    ga_cmd = json.dumps({
+        "execute": "guest-exec",
+        "arguments": {
+            "path": "/bin/bash",
+            "arg": ["-c", cmd_str],
+            "capture-output": True
+        }
+    })
+
     try:
-        run(ssh_cmd)
+        result = virsh(f"qemu-agent-command {args.name} '{ga_cmd}'")
+        stdout = result.stdout if isinstance(result.stdout, str) else result.stdout.decode()
+        data = json.loads(stdout)
+        pid = data.get("return", {}).get("pid")
+
+        if pid is None:
+            raise RuntimeError("guest-exec returned no pid")
+
+        # Wait for command to finish
+        import time
+        for _ in range(10):
+            time.sleep(1)
+            status_cmd = json.dumps({"execute": "guest-exec-status", "arguments": {"pid": pid}})
+            res2 = virsh(f"qemu-agent-command {args.name} '{status_cmd}'")
+            out2 = res2.stdout if isinstance(res2.stdout, str) else res2.stdout.decode()
+            status = json.loads(out2).get("return", {})
+            if status.get("exited"):
+                if status.get("exitcode", 0) != 0:
+                    err = base64.b64decode(status.get("err-data", "")).decode()
+                    raise RuntimeError(f"chpasswd failed: {err}")
+                break
+
         print(f"\n{'='*60}")
-        print(f"Password changed successfully for VM '{args.name}'!")
+        print(f"Password changed for VM '{args.name}'!")
         print(f"{'='*60}")
-        print(f"\nNew SSH Password (shown once):")
+        print(f"\nNew password (shown once):")
         print(f"  Password: {new_password}")
-        print(f"  Command: ssh nox@{ip}")
-        print(f"\nIMPORTANT: Save this password - it won't be shown again!")
+        print(f"\nConnect: nox ssh {args.name}")
         print(f"{'='*60}")
+
     except RuntimeError as e:
         print(f"Failed to change password: {e}", file=sys.stderr)
         sys.exit(1)
