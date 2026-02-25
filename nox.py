@@ -50,8 +50,8 @@ DEFAULT_CONFIG = {
 # OS image URLs (cloud images with cloud-init support)
 OS_IMAGES = {
     "debian": {
-        "url": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-arm64.qcow2",
-        "url_amd64": "https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-genericcloud-amd64.qcow2",
+        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-arm64.qcow2",
+        "url_amd64": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
     },
 }
 
